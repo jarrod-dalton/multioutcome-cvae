@@ -88,23 +88,7 @@ def plot_correlation_heatmap(
     show: bool = True,
     figsize: Tuple[float, float] = (6.0, 5.0),
 ):
-    """Plot a heatmap of a correlation matrix, masking the diagonal.
-
-    Parameters
-    ----------
-    corr : np.ndarray
-        (d, d) correlation matrix.
-    title : str, optional
-        Plot title.
-    show : bool
-        Whether to call plt.show() at the end.
-    figsize : tuple
-        Figure size.
-
-    Returns
-    -------
-    (fig, ax)
-    """
+    """Plot a heatmap of a correlation matrix, masking the diagonal."""
     d = corr.shape[0]
     corr_plot = corr.copy()
     np.fill_diagonal(corr_plot, np.nan)  # mask the 1.0 diagonal
@@ -134,27 +118,7 @@ def summarize_binary_matrix(
     name: str = "Y",
     make_plot: bool = False,
 ) -> Dict[str, np.ndarray]:
-    """Summarize a binary outcome matrix.
-
-    - Prints marginal probabilities
-    - Computes full correlation matrix
-    - Optionally returns and plots a heatmap
-
-    Parameters
-    ----------
-    Y : array (n, d)
-    name : str
-        Label for printing / plot title.
-    make_plot : bool
-        If True, create and return a correlation heatmap.
-
-    Returns
-    -------
-    dict with keys:
-        - 'marginals' : array (d,)
-        - 'corr'      : array (d, d)
-        - 'fig'       : matplotlib Figure (if make_plot=True)
-    """
+    """Summarize a binary outcome matrix."""
     n_outcomes = Y.shape[1]
 
     marginals = Y.mean(axis=0)
@@ -186,28 +150,7 @@ def compare_real_vs_generated(
     make_plot: bool = True,
     show: bool = True,
 ) -> Dict[str, np.ndarray]:
-    """Compare marginals and correlations between real and generated Y.
-
-    Parameters
-    ----------
-    Y_real : array (n_real, d)
-    Y_gen : array (n_gen, d)
-    label_real, label_gen : str
-        Labels for printing and plots.
-    make_plot : bool
-        If True, produce side-by-side correlation heatmaps.
-    show : bool
-        If True, call plt.show().
-
-    Returns
-    -------
-    dict with keys:
-        - 'real_marginals' : array (d,)
-        - 'gen_marginals'  : array (d,)
-        - 'real_corr'      : array (d, d)
-        - 'gen_corr'       : array (d, d)
-        - 'fig'            : matplotlib Figure (if make_plot=True)
-    """
+    """Compare marginals and correlations between real and generated Y."""
     print("=== Marginal probabilities ===")
     real_marg = Y_real.mean(axis=0)
     gen_marg = Y_gen.mean(axis=0)
