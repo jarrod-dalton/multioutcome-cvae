@@ -1,6 +1,6 @@
-
 import numpy as np
-from typing import Dict, Tuple
+import matplotlib.pyplot as plt
+from typing import Dict, Tuple, Optional
 
 
 def simulate_cvae_data(
@@ -82,8 +82,79 @@ def train_val_test_split(
     )
 
 
-def summarize_binary_matrix(Y: np.ndarray, name: str = "Y") -> None:
-    """Print marginal probabilities and a small correlation block."""
+def plot_correlation_heatmap(
+    corr: np.ndarray,
+    title: Optional[str] = None,
+    show: bool = True,
+    figsize: Tuple[float, float] = (6.0, 5.0),
+):
+    """Plot a heatmap of a correlation matrix, masking the diagonal.
+
+    Parameters
+    ----------
+    corr : np.ndarray
+        (d, d) correlation matrix.
+    title : str, optional
+        Plot title.
+    show : bool
+        Whether to call plt.show() at the end.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    (fig, ax)
+    """
+    d = corr.shape[0]
+    corr_plot = corr.copy()
+    np.fill_diagonal(corr_plot, np.nan)  # mask the 1.0 diagonal
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(corr_plot, vmin=-1, vmax=1, cmap="coolwarm")
+
+    ax.set_xlabel("Outcome index")
+    ax.set_ylabel("Outcome index")
+    ax.set_xticks(range(d))
+    ax.set_yticks(range(d))
+
+    if title is not None:
+        ax.set_title(title)
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Correlation")
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
+def summarize_binary_matrix(
+    Y: np.ndarray,
+    name: str = "Y",
+    make_plot: bool = False,
+) -> Dict[str, np.ndarray]:
+    """Summarize a binary outcome matrix.
+
+    - Prints marginal probabilities
+    - Computes full correlation matrix
+    - Optionally returns and plots a heatmap
+
+    Parameters
+    ----------
+    Y : array (n, d)
+    name : str
+        Label for printing / plot title.
+    make_plot : bool
+        If True, create and return a correlation heatmap.
+
+    Returns
+    -------
+    dict with keys:
+        - 'marginals' : array (d,)
+        - 'corr'      : array (d, d)
+        - 'fig'       : matplotlib Figure (if make_plot=True)
+    """
     n_outcomes = Y.shape[1]
 
     marginals = Y.mean(axis=0)
@@ -93,8 +164,18 @@ def summarize_binary_matrix(Y: np.ndarray, name: str = "Y") -> None:
         print(f"  Outcome {j}: {marginals[j]:.3f}")
 
     corr = np.corrcoef(Y.T)
-    print("\nPairwise correlations (first 5x5 block):")
-    print(np.round(corr[:5, :5], 3))
+
+    result: Dict[str, np.ndarray] = {
+        "marginals": marginals,
+        "corr": corr,
+    }
+
+    if make_plot:
+        title = f"Correlation heatmap: {name}"
+        fig, ax = plot_correlation_heatmap(corr, title=title, show=True)
+        result["fig"] = fig  # type: ignore[assignment]
+
+    return result
 
 
 def compare_real_vs_generated(
@@ -102,8 +183,31 @@ def compare_real_vs_generated(
     Y_gen: np.ndarray,
     label_real: str = "Real",
     label_gen: str = "Generated",
-) -> None:
-    """Compare marginals and correlations between real and generated Y."""
+    make_plot: bool = True,
+    show: bool = True,
+) -> Dict[str, np.ndarray]:
+    """Compare marginals and correlations between real and generated Y.
+
+    Parameters
+    ----------
+    Y_real : array (n_real, d)
+    Y_gen : array (n_gen, d)
+    label_real, label_gen : str
+        Labels for printing and plots.
+    make_plot : bool
+        If True, produce side-by-side correlation heatmaps.
+    show : bool
+        If True, call plt.show().
+
+    Returns
+    -------
+    dict with keys:
+        - 'real_marginals' : array (d,)
+        - 'gen_marginals'  : array (d,)
+        - 'real_corr'      : array (d, d)
+        - 'gen_corr'       : array (d, d)
+        - 'fig'            : matplotlib Figure (if make_plot=True)
+    """
     print("=== Marginal probabilities ===")
     real_marg = Y_real.mean(axis=0)
     gen_marg = Y_gen.mean(axis=0)
@@ -116,8 +220,44 @@ def compare_real_vs_generated(
     real_corr = np.corrcoef(Y_real.T)
     gen_corr = np.corrcoef(Y_gen.T)
 
-    print("\n=== Pairwise correlations (first 5x5 block) ===")
-    print(f"{label_real} correlations:")
-    print(np.round(real_corr[:5, :5], 3))
-    print(f"\n{label_gen} correlations:")
-    print(np.round(gen_corr[:5, :5], 3))
+    result: Dict[str, np.ndarray] = {
+        "real_marginals": real_marg,
+        "gen_marginals": gen_marg,
+        "real_corr": real_corr,
+        "gen_corr": gen_corr,
+    }
+
+    if make_plot:
+        d = real_corr.shape[0]
+        real_plot = real_corr.copy()
+        gen_plot = gen_corr.copy()
+        np.fill_diagonal(real_plot, np.nan)
+        np.fill_diagonal(gen_plot, np.nan)
+
+        vmin, vmax = -1, 1
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+
+        im0 = axes[0].imshow(real_plot, vmin=vmin, vmax=vmax, cmap="coolwarm")
+        axes[0].set_title(f"{label_real} correlation")
+        axes[0].set_xlabel("Outcome index")
+        axes[0].set_ylabel("Outcome index")
+        axes[0].set_xticks(range(d))
+        axes[0].set_yticks(range(d))
+
+        im1 = axes[1].imshow(gen_plot, vmin=vmin, vmax=vmax, cmap="coolwarm")
+        axes[1].set_title(f"{label_gen} correlation")
+        axes[1].set_xlabel("Outcome index")
+        axes[1].set_ylabel("Outcome index")
+        axes[1].set_xticks(range(d))
+        axes[1].set_yticks(range(d))
+
+        # Single colorbar
+        fig.colorbar(im1, ax=axes.ravel().tolist(), label="Correlation")
+
+        if show:
+            plt.show()
+
+        result["fig"] = fig  # type: ignore[assignment]
+
+    return result
