@@ -434,21 +434,7 @@ def tune_cvae_random_search(
     base_seed: int = 1234,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Random-search hyperparameter tuning for CVAETrainer.
-
-    search_space can include, for example:
-      {
-        "latent_dim":      [4, 8, 16],
-        "hidden_dim":      [32, 64],
-        "n_hidden_layers": [1, 2, 3],
-        "enc_hidden_dims": [[128, 64], [64, 64, 32]],
-        "dec_hidden_dims": [[128, 64], [64, 64, 32]],
-        "lr":              [1e-2, 1e-3],
-        "beta_kl":         [0.5, 1.0, 2.0],
-        "batch_size":      [128, 256],
-        "num_epochs":      [20, 40]
-      }
-    """
+    """Random-search hyperparameter tuning for CVAETrainer."""
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -563,7 +549,6 @@ def tune_cvae_tpe(
     trials_hpo = Trials()
 
     def objective(cfg: Dict[str, Any]):
-        # cfg already contains chosen values (not indices) when using hp.choice
         nonlocal base_seed
 
         trainer = CVAETrainer(
@@ -640,4 +625,154 @@ def tune_cvae_tpe(
         "trials": trials,
         "best_config": best_config,
         "best_val_loss": best_val_loss,
+    }
+
+
+def fit_cvae_with_tuning(
+    X: np.ndarray,
+    Y: np.ndarray,
+    search_space: Dict[str, List[Any]],
+    method: str = "random",
+    n_trials: int = 20,
+    train_frac: float = 0.8,
+    seed: int = 1234,
+    device: Optional[str] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Convenience function: split, tune, then refit on full data.
+
+    This is intended for users who are *not* using MLflow. It:
+
+      1. Randomly splits X, Y into train/val.
+      2. Runs hyperparameter tuning (random or TPE).
+      3. Refits a CVAETrainer on the full dataset (train+val) using best config.
+      4. Returns the fitted trainer and tuning results.
+
+    Parameters
+    ----------
+    X, Y : np.ndarray
+        Full dataset.
+    search_space : dict
+        Dict of hyperparameter -> list of candidate values, e.g.:
+
+        {
+          "latent_dim":      [4, 8, 16],
+          "enc_hidden_dims": [[64, 64], [128, 64]],
+          "dec_hidden_dims": [[64, 64], [128, 64]],
+          "lr":              [1e-3, 5e-4],
+          "beta_kl":         [0.5, 1.0],
+          "batch_size":      [128, 256],
+          "num_epochs":      [20, 40]
+        }
+
+    method : {"random", "tpe"}
+        Tuning algorithm.
+    n_trials : int
+        Number of trials for tuning.
+    train_frac : float
+        Fraction of data used as training within tuning step (rest is val).
+    seed : int
+        RNG seed for the split.
+    device : str or None
+        "cuda" or "cpu" (None = auto).
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    dict with:
+      - 'trainer'       : fitted CVAETrainer on full data
+      - 'best_config'   : dict of best hyperparameters
+      - 'tuning_results': dict from tune_cvae_* (trials, best_val_loss, ...)
+      - 'train_indices' : indices used for training during tuning
+      - 'val_indices'   : indices used for validation during tuning
+    """
+    X = np.asarray(X, dtype=np.float32)
+    Y = np.asarray(Y, dtype=np.float32)
+    assert X.shape[0] == Y.shape[0]
+    n, x_dim = X.shape
+    y_dim = Y.shape[1]
+
+    # Split into train/val for tuning
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
+    rng.shuffle(idx)
+    n_train = int(train_frac * n)
+    idx_train = idx[:n_train]
+    idx_val = idx[n_train:]
+
+    X_train, Y_train = X[idx_train], Y[idx_train]
+    X_val,   Y_val   = X[idx_val],   Y[idx_val]
+
+    if method.lower() == "random":
+        tuning_results = tune_cvae_random_search(
+            X_train=X_train,
+            Y_train=Y_train,
+            X_val=X_val,
+            Y_val=Y_val,
+            x_dim=x_dim,
+            y_dim=y_dim,
+            search_space=search_space,
+            n_trials=n_trials,
+            device=device,
+            base_seed=seed,
+            verbose=verbose,
+        )
+    elif method.lower() == "tpe":
+        tuning_results = tune_cvae_tpe(
+            X_train=X_train,
+            Y_train=Y_train,
+            X_val=X_val,
+            Y_val=Y_val,
+            x_dim=x_dim,
+            y_dim=y_dim,
+            search_space=search_space,
+            n_trials=n_trials,
+            device=device,
+            base_seed=seed,
+            verbose=verbose,
+        )
+    else:
+        raise ValueError("method must be 'random' or 'tpe'")
+
+    best_config = tuning_results["best_config"]
+    if verbose:
+        print("\nBest config from tuning:")
+        print(best_config)
+
+    # Refit on full dataset using best_config
+    trainer = CVAETrainer(
+        x_dim=x_dim,
+        y_dim=y_dim,
+        latent_dim=best_config.get("latent_dim", 8),
+        enc_hidden_dims=best_config.get("enc_hidden_dims", None),
+        dec_hidden_dims=best_config.get("dec_hidden_dims", None),
+        hidden_dim=best_config.get("hidden_dim", 64),
+        n_hidden_layers=best_config.get("n_hidden_layers", 2),
+        num_epochs=best_config.get("num_epochs", 50),
+        batch_size=best_config.get("batch_size", 256),
+        lr=best_config.get("lr", 1e-3),
+        beta_kl=best_config.get("beta_kl", 1.0),
+        device=device,
+    )
+
+    trainer.fit(
+        X_train=X,
+        Y_train=Y,
+        X_val=None,
+        Y_val=None,
+        num_epochs=best_config.get("num_epochs", None),
+        batch_size=best_config.get("batch_size", None),
+        lr=best_config.get("lr", None),
+        beta_kl=best_config.get("beta_kl", None),
+        verbose=verbose,
+        seed=seed,
+    )
+
+    return {
+        "trainer": trainer,
+        "best_config": best_config,
+        "tuning_results": tuning_results,
+        "train_indices": idx_train,
+        "val_indices": idx_val,
     }
