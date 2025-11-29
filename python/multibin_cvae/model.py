@@ -31,7 +31,7 @@ class MultivariateBinaryCVAE(nn.Module):
     Decoder: p(y | x, z)
     Prior:   p(z) = N(0, I)
 
-    Now supports flexible hidden layer configurations via
+    Supports flexible hidden layer configurations via
     enc_hidden_dims and dec_hidden_dims.
     """
 
@@ -48,7 +48,7 @@ class MultivariateBinaryCVAE(nn.Module):
         self.y_dim = y_dim
         self.latent_dim = latent_dim
 
-        # Defaults: two hidden layers of size 64, like before
+        # Defaults: two hidden layers of size 64 (backwards compatible)
         if enc_hidden_dims is None or len(enc_hidden_dims) == 0:
             enc_hidden_dims = [64, 64]
         if dec_hidden_dims is None or len(dec_hidden_dims) == 0:
@@ -112,7 +112,7 @@ class MultivariateBinaryCVAE(nn.Module):
 class CVAETrainer:
     """High-level wrapper for training and using MultivariateBinaryCVAE.
 
-    Designed to be easy to call from R via reticulate, and now supports
+    Designed to be easy to call from R via reticulate, and supports
     flexible hidden configs:
 
     - Use enc_hidden_dims / dec_hidden_dims explicitly, OR
@@ -365,7 +365,21 @@ def tune_cvae_random_search(
     base_seed: int = 1234,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Random-search hyperparameter tuning for CVAETrainer."""
+    """Random-search hyperparameter tuning for CVAETrainer.
+
+    search_space can include, for example:
+      {
+        "latent_dim":     [4, 8, 16],
+        "hidden_dim":     [32, 64],
+        "n_hidden_layers":[1, 2, 3],
+        "enc_hidden_dims":[[128, 64], [64, 64, 32]],
+        "dec_hidden_dims":[[128, 64], [64, 64, 32]],
+        "lr":             [1e-2, 1e-3],
+        "beta_kl":        [0.5, 1.0, 2.0],
+        "batch_size":     [128, 256],
+        "num_epochs":     [20, 40]
+      }
+    """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -386,8 +400,10 @@ def tune_cvae_random_search(
             x_dim=x_dim,
             y_dim=y_dim,
             latent_dim=cfg.get("latent_dim", 8),
-            # if desired, you can add enc_hidden_dims/dec_hidden_dims to the search_space later
+            enc_hidden_dims=cfg.get("enc_hidden_dims", None),
+            dec_hidden_dims=cfg.get("dec_hidden_dims", None),
             hidden_dim=cfg.get("hidden_dim", 64),
+            n_hidden_layers=cfg.get("n_hidden_layers", 2),
             num_epochs=cfg.get("num_epochs", 50),
             batch_size=cfg.get("batch_size", 256),
             lr=cfg.get("lr", 1e-3),
