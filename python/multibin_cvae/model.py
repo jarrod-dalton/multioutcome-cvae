@@ -1,4 +1,3 @@
-
 import numpy as np
 from typing import Optional, Dict, Any, List
 import random
@@ -31,37 +30,61 @@ class MultivariateBinaryCVAE(nn.Module):
     Encoder: q(z | x, y)
     Decoder: p(y | x, z)
     Prior:   p(z) = N(0, I)
+
+    Now supports flexible hidden layer configurations via
+    enc_hidden_dims and dec_hidden_dims.
     """
+
     def __init__(
         self,
         x_dim: int,
         y_dim: int,
         latent_dim: int = 8,
-        hidden_dim: int = 64,
+        enc_hidden_dims: Optional[List[int]] = None,
+        dec_hidden_dims: Optional[List[int]] = None,
     ):
         super().__init__()
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
 
-        # Encoder: input = [X, Y]
+        # Defaults: two hidden layers of size 64, like before
+        if enc_hidden_dims is None or len(enc_hidden_dims) == 0:
+            enc_hidden_dims = [64, 64]
+        if dec_hidden_dims is None or len(dec_hidden_dims) == 0:
+            dec_hidden_dims = enc_hidden_dims
+
+        self.enc_hidden_dims = enc_hidden_dims
+        self.dec_hidden_dims = dec_hidden_dims
+
+        # ----- Encoder: [X, Y] -> hidden -> (mu, logvar) -----
         enc_input_dim = x_dim + y_dim
-        self.enc_fc1 = nn.Linear(enc_input_dim, hidden_dim)
-        self.enc_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.enc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.enc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.enc_layers = nn.ModuleList()
+        in_dim = enc_input_dim
+        for h_dim in enc_hidden_dims:
+            self.enc_layers.append(nn.Linear(in_dim, h_dim))
+            in_dim = h_dim
+        enc_last_dim = in_dim
 
-        # Decoder: input = [X, z]
+        self.enc_mu = nn.Linear(enc_last_dim, latent_dim)
+        self.enc_logvar = nn.Linear(enc_last_dim, latent_dim)
+
+        # ----- Decoder: [X, z] -> hidden -> logits(Y) -----
         dec_input_dim = x_dim + latent_dim
-        self.dec_fc1 = nn.Linear(dec_input_dim, hidden_dim)
-        self.dec_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.dec_out = nn.Linear(hidden_dim, y_dim)  # logits
+        self.dec_layers = nn.ModuleList()
+        in_dim = dec_input_dim
+        for h_dim in dec_hidden_dims:
+            self.dec_layers.append(nn.Linear(in_dim, h_dim))
+            in_dim = h_dim
+        dec_last_dim = in_dim
+
+        self.dec_out = nn.Linear(dec_last_dim, y_dim)  # logits
 
     def encode(self, x: torch.Tensor, y: torch.Tensor):
+        """q(z | x, y) parameterized by MLP over [x, y]."""
         h = torch.cat([x, y], dim=1)
-        h = F.relu(self.enc_fc1(h))
-        h = F.relu(self.enc_fc2(h))
+        for layer in self.enc_layers:
+            h = F.relu(layer(h))
         mu = self.enc_mu(h)
         logvar = self.enc_logvar(h)
         return mu, logvar
@@ -69,12 +92,13 @@ class MultivariateBinaryCVAE(nn.Module):
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
-        return mu + eps * std
+        return mu + std * eps
 
     def decode(self, x: torch.Tensor, z: torch.Tensor):
+        """p(y | x, z) parameterized by MLP over [x, z]."""
         h = torch.cat([x, z], dim=1)
-        h = F.relu(self.dec_fc1(h))
-        h = F.relu(self.dec_fc2(h))
+        for layer in self.dec_layers:
+            h = F.relu(layer(h))
         logits = self.dec_out(h)
         return logits
 
@@ -88,14 +112,23 @@ class MultivariateBinaryCVAE(nn.Module):
 class CVAETrainer:
     """High-level wrapper for training and using MultivariateBinaryCVAE.
 
-    Designed to be easy to call from R via reticulate.
+    Designed to be easy to call from R via reticulate, and now supports
+    flexible hidden configs:
+
+    - Use enc_hidden_dims / dec_hidden_dims explicitly, OR
+    - Use hidden_dim + n_hidden_layers for simple symmetric MLPs.
     """
+
     def __init__(
         self,
         x_dim: int,
         y_dim: int,
         latent_dim: int = 8,
+        # Flexible hidden config
+        enc_hidden_dims: Optional[List[int]] = None,
+        dec_hidden_dims: Optional[List[int]] = None,
         hidden_dim: int = 64,
+        n_hidden_layers: int = 2,
         # default training hyperparams
         num_epochs: int = 50,
         batch_size: int = 256,
@@ -106,9 +139,17 @@ class CVAETrainer:
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
 
-        # Default training params
+        # Resolve hidden layer configs
+        if enc_hidden_dims is None:
+            enc_hidden_dims = [hidden_dim] * n_hidden_layers
+        if dec_hidden_dims is None:
+            dec_hidden_dims = enc_hidden_dims
+
+        self.enc_hidden_dims = enc_hidden_dims
+        self.dec_hidden_dims = dec_hidden_dims
+
+        # Default training params (can override in fit())
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         self.lr = lr
@@ -122,7 +163,8 @@ class CVAETrainer:
             x_dim=x_dim,
             y_dim=y_dim,
             latent_dim=latent_dim,
-            hidden_dim=hidden_dim,
+            enc_hidden_dims=enc_hidden_dims,
+            dec_hidden_dims=dec_hidden_dims,
         ).to(self.device)
 
         self.x_mean: Optional[np.ndarray] = None
@@ -344,6 +386,7 @@ def tune_cvae_random_search(
             x_dim=x_dim,
             y_dim=y_dim,
             latent_dim=cfg.get("latent_dim", 8),
+            # if desired, you can add enc_hidden_dims/dec_hidden_dims to the search_space later
             hidden_dim=cfg.get("hidden_dim", 64),
             num_epochs=cfg.get("num_epochs", 50),
             batch_size=cfg.get("batch_size", 256),
