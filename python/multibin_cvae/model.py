@@ -304,6 +304,75 @@ class CVAETrainer:
         self.trained = True
         return history
 
+    # ---- prediction of probabilities ----
+    def predict_proba(
+        self,
+        X: np.ndarray,
+        n_mc: int = 20,
+    ) -> np.ndarray:
+        """Approximate E_z[p(Y=1 | X, z)] via Monte Carlo over z.
+
+        Returns
+        -------
+        probs : array (n, y_dim)
+        """
+        assert self.trained, "Model must be trained before calling predict_proba()."
+
+        X = np.asarray(X, dtype=np.float32)
+        X_std = self._standardize(X)
+        n, x_dim = X_std.shape
+        assert x_dim == self.x_dim
+
+        self.model.eval()
+        with torch.no_grad():
+            x_tensor = torch.from_numpy(X_std).to(self.device)
+            probs_accum = torch.zeros((n, self.y_dim), device=self.device)
+            for _ in range(n_mc):
+                z = torch.randn((n, self.latent_dim), device=self.device)
+                logits = self.model.decode(x_tensor, z)
+                probs = torch.sigmoid(logits)
+                probs_accum += probs
+            probs_mean = probs_accum / float(n_mc)
+            return probs_mean.cpu().numpy()
+
+    # ---- log-likelihood-style evaluation ----
+    def evaluate_loglik(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        n_mc: int = 20,
+        eps: float = 1e-7,
+    ) -> Dict[str, float]:
+        """Evaluate log-likelihood-based goodness-of-fit.
+
+        Uses an MC approximation to p_ij = E_z[p(Y_ij=1 | X_i, z)] and computes:
+
+        sum_{i,j} [Y_ij * log(p_ij) + (1 - Y_ij) * log(1 - p_ij)]
+
+        Returns
+        -------
+        dict with:
+          - 'sum_loglik'
+          - 'avg_loglik'  (per element)
+          - 'avg_bce'     (negative avg_loglik)
+        """
+        probs = self.predict_proba(X, n_mc=n_mc)
+        Y = np.asarray(Y, dtype=np.float32)
+        assert Y.shape == probs.shape
+
+        p = np.clip(probs, eps, 1.0 - eps)
+
+        ll_matrix = Y * np.log(p) + (1.0 - Y) * np.log(1.0 - p)
+        sum_ll = float(ll_matrix.sum())
+        avg_ll = float(sum_ll / (Y.shape[0] * Y.shape[1]))
+        avg_bce = float(-avg_ll)
+
+        return {
+            "sum_loglik": sum_ll,
+            "avg_loglik": avg_ll,
+            "avg_bce": avg_bce,
+        }
+
     # ---- generation / simulation ----
     def generate(
         self,
@@ -369,15 +438,15 @@ def tune_cvae_random_search(
 
     search_space can include, for example:
       {
-        "latent_dim":     [4, 8, 16],
-        "hidden_dim":     [32, 64],
-        "n_hidden_layers":[1, 2, 3],
-        "enc_hidden_dims":[[128, 64], [64, 64, 32]],
-        "dec_hidden_dims":[[128, 64], [64, 64, 32]],
-        "lr":             [1e-2, 1e-3],
-        "beta_kl":        [0.5, 1.0, 2.0],
-        "batch_size":     [128, 256],
-        "num_epochs":     [20, 40]
+        "latent_dim":      [4, 8, 16],
+        "hidden_dim":      [32, 64],
+        "n_hidden_layers": [1, 2, 3],
+        "enc_hidden_dims": [[128, 64], [64, 64, 32]],
+        "dec_hidden_dims": [[128, 64], [64, 64, 32]],
+        "lr":              [1e-2, 1e-3],
+        "beta_kl":         [0.5, 1.0, 2.0],
+        "batch_size":      [128, 256],
+        "num_epochs":      [20, 40]
       }
     """
     if device is None:
@@ -412,7 +481,7 @@ def tune_cvae_random_search(
         )
 
         if verbose:
-            print(f"\n=== Trial {t+1}/{n_trials} ===")
+            print(f"\n=== Random Trial {t+1}/{n_trials} ===")
             print("Config:", cfg)
 
         history = trainer.fit(
@@ -441,10 +510,130 @@ def tune_cvae_random_search(
         trials.append(trial_result)
 
         if verbose:
-            print(f"Trial {t+1} val_loss: {val_loss:.4f}")
+            print(f"Random trial {t+1} val_loss: {val_loss:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_config = cfg
+
+    return {
+        "trials": trials,
+        "best_config": best_config,
+        "best_val_loss": best_val_loss,
+    }
+
+
+def tune_cvae_tpe(
+    X_train: np.ndarray,
+    Y_train: np.ndarray,
+    X_val: np.ndarray,
+    Y_val: np.ndarray,
+    x_dim: int,
+    y_dim: int,
+    search_space: Dict[str, List[Any]],
+    n_trials: int = 20,
+    device: Optional[str] = None,
+    base_seed: int = 1234,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """TPE-based hyperparameter tuning using hyperopt.
+
+    Uses the same style search_space as tune_cvae_random_search, but
+    leverages hyperopt's Tree-structured Parzen Estimator (TPE) algo.
+
+    NOTE: Requires hyperopt to be installed:
+      pip install hyperopt
+    """
+    try:
+        from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
+    except ImportError as e:
+        raise ImportError(
+            "hyperopt is required for tune_cvae_tpe. "
+            "Install via `pip install hyperopt`."
+        ) from e
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Turn discrete candidate values into hp.choice spaces
+    hp_space = {}
+    for k, vals in search_space.items():
+        hp_space[k] = hp.choice(k, vals)
+
+    trials_hpo = Trials()
+
+    def objective(cfg: Dict[str, Any]):
+        # cfg already contains chosen values (not indices) when using hp.choice
+        nonlocal base_seed
+
+        trainer = CVAETrainer(
+            x_dim=x_dim,
+            y_dim=y_dim,
+            latent_dim=cfg.get("latent_dim", 8),
+            enc_hidden_dims=cfg.get("enc_hidden_dims", None),
+            dec_hidden_dims=cfg.get("dec_hidden_dims", None),
+            hidden_dim=cfg.get("hidden_dim", 64),
+            n_hidden_layers=cfg.get("n_hidden_layers", 2),
+            num_epochs=cfg.get("num_epochs", 50),
+            batch_size=cfg.get("batch_size", 256),
+            lr=cfg.get("lr", 1e-3),
+            beta_kl=cfg.get("beta_kl", 1.0),
+            device=device,
+        )
+
+        if verbose:
+            print("\n=== TPE trial ===")
+            print("Config:", cfg)
+
+        history = trainer.fit(
+            X_train=X_train,
+            Y_train=Y_train,
+            X_val=X_val,
+            Y_val=Y_val,
+            num_epochs=cfg.get("num_epochs", None),
+            batch_size=cfg.get("batch_size", None),
+            lr=cfg.get("lr", None),
+            beta_kl=cfg.get("beta_kl", None),
+            verbose=verbose,
+            seed=base_seed,
+        )
+
+        if len(history.get("val_loss", [])) > 0:
+            val_loss = history["val_loss"][-1]
+        else:
+            val_loss = history["train_loss"][-1]
+
+        if verbose:
+            print(f"TPE trial val_loss: {val_loss:.4f}")
+
+        return {
+            "loss": val_loss,
+            "status": STATUS_OK,
+            "config": cfg,
+        }
+
+    best = fmin(
+        fn=objective,
+        space=hp_space,
+        algo=tpe.suggest,
+        max_evals=n_trials,
+        trials=trials_hpo,
+        rstate=np.random.default_rng(base_seed),
+    )
+
+    # Extract all trials in a friendly format
+    trials: List[Dict[str, Any]] = []
+    best_val_loss = float("inf")
+    best_config: Optional[Dict[str, Any]] = None
+
+    for tr in trials_hpo.trials:
+        result = tr["result"]
+        cfg = result["config"]
+        loss = float(result["loss"])
+        trials.append({"config": cfg, "val_loss": loss})
+
+        if loss < best_val_loss:
+            best_val_loss = loss
             best_config = cfg
 
     return {
