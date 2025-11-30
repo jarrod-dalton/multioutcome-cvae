@@ -3,18 +3,28 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "multioutcome-cvae"  # pip/distribution name (see note below)
+name = "multioutcome-cvae"             # pip / distribution name
 version = "0.1.0"
-description = "Conditional variational autoencoder for multivariate outcomes (Bernoulli, Gaussian, Poisson)"
+description = "Conditional Variational Autoencoder for multivariate outcomes (Bernoulli, Gaussian, Poisson)"
 readme = "README.md"
 requires-python = ">=3.9"
+
 authors = [
-  { name = "Your Name", email = "you@example.com" }
+  { name = "Jarrod Dalton" }
 ]
+
 license = { text = "MIT" }
 
-# These are just metadata; adjust as you like
-keywords = ["cvae", "variational autoencoder", "multivariate", "simulation", "ML"]
+keywords = [
+  "cvae",
+  "variational-autoencoder",
+  "multivariate",
+  "simulation",
+  "generative-models",
+  "machine-learning",
+  "deep-learning"
+]
+
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -22,14 +32,16 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+# Runtime dependencies
 dependencies = [
-  "numpy",
-  "torch",
-  "matplotlib",
-  "mlflow",
-  "hyperopt",
+  "numpy>=1.20",
+  "torch>=2.0",
+  "matplotlib>=3.3",
+  "mlflow>=2.0",
+  "hyperopt>=0.2",
 ]
 
+# Tell setuptools where packages live
 [tool.setuptools]
 package-dir = {"" = "python"}
 
