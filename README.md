@@ -271,8 +271,6 @@ The tests are designed to be stable across platforms and catch API regressions w
 
 ---
 
-## 9. Examples
-
 For concrete, runnable code, see the scripts in:
 
 - `python/multibin_cvae/examples/`
