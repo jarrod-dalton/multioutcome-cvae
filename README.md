@@ -281,54 +281,86 @@ You now have a reusable CVAE training pipeline with tracking, parameters, metric
 
 # 5. Evaluation Notes
 
+This section describes the two primary evaluation metrics:
+
+- **Log-likelihood / cross-entropy**
+- **Correlation structure / marginal comparison**
+
+Both are important for multivariate binary outcome models such as a CVAE.
+
+---
+
 ## 5.1 Log-likelihood / cross-entropy
+
+We evaluate goodness-of-fit using a Monte Carlo approximation to  
+the conditional probabilities produced by the CVAE.
 
 Given:
 
-- \( Y \in \{0,1\}^{n \times d} \)
-- CVAE posterior-averaged probabilities  
-  \( \hat{p}_{ij} = \mathbb{E}_z[p(Y_{ij}=1 \mid X_i, z)] \)
+- Y is an n × d matrix of binary outcomes  
+- The CVAE produces posterior-averaged probabilities  
+  p_hat[i, j] = E_z[ p(Y[i, j] = 1 | X[i], z) ]
 
-The log-likelihood-style measure is:
+The log-likelihood-style score is:
 
-\[
-\text{LL} = \sum_{i=1}^n \sum_{j=1}^d
-\left[
-Y_{ij} \log(\hat{p}_{ij}) +
-(1 - Y_{ij}) \log(1 - \hat{p}_{ij})
-\right].
-\]
+```
+LL = Σ_{i=1..n} Σ_{j=1..d} [
+        Y[i,j]     * log(p_hat[i,j]) +
+        (1-Y[i,j]) * log(1 - p_hat[i,j])
+    ]
+```
 
-Average per-element loglik:
+Average per-element log-likelihood:
 
-\[
-\text{avg\_LL} = \frac{1}{nd} \text{LL}.
-\]
+```
+avg_LL = LL / (n * d)
+```
 
-Negative average loglik = cross-entropy:
+Negative average log-likelihood (cross-entropy):
 
-\[
-\text{avg\_BCE} = -\text{avg\_LL}.
-\]
+```
+avg_BCE = -avg_LL
+```
 
-Call:
+Compute in Python using:
 
 ```python
 trainer.evaluate_loglik(X_test, Y_test)
 ```
 
-## 5.2 Correlation diagnostics
+which returns:
 
-Heatmaps compare dependence structure:
-
-- `summarize_binary_matrix(Y, make_plot=True)`  
-- `compare_real_vs_generated(Y_real, Y_gen, make_plot=True)`  
-
-These visualize:
-
-- Marginal prevalence  
-- Pairwise correlation structure (diagonal masked)
-
-Useful for checking joint behavior not captured by log-likelihood alone.
+- `sum_loglik`
+- `avg_loglik`
+- `avg_bce`
 
 ---
+
+## 5.2 Correlation and marginal structure
+
+Evaluating multivariate Bernoulli models requires checking that  
+the **dependence structure** is preserved, not only the marginals.
+
+To visualize this:
+
+```python
+from multibin_cvae import summarize_binary_matrix, compare_real_vs_generated
+
+# real:
+summarize_binary_matrix(Y_test, make_plot=True)
+
+# generated:
+Y_gen = trainer.generate(X_test, n_samples_per_x=1)
+Y_gen = Y_gen.reshape(-1, Y_gen.shape[-1])
+compare_real_vs_generated(Y_test, Y_gen, make_plot=True)
+```
+
+This produces:
+
+- Marginal prevalence barplots  
+- A masked correlation heatmap showing off-diagonal correlation structure  
+- Side-by-side comparison (real vs generated)
+
+These tools are particularly important when using a CVAE  
+to preserve the **joint multivariate structure** of binary outcomes.
+
