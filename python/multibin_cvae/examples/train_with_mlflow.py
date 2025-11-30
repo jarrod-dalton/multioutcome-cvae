@@ -19,6 +19,7 @@ Python notebook cell, or `import` this file and call run_experiment().
 """
 
 import os
+import tempfile
 from typing import Dict, Any
 
 import numpy as np
@@ -194,6 +195,23 @@ def run_experiment(
         if fig is not None:
             mlflow.log_figure(fig, "corr_test_vs_generated.png")
             plt.close(fig)
+
+        # -------------------------------
+        # 5b. Log standardization parameters for X
+        # -------------------------------
+        # These are needed at inference time to reproduce X -> X_std used in training.
+        # They will be consumed by examples/use_mlflow_model.py.
+        if trainer.x_mean is not None and trainer.x_std is not None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                x_mean_path = os.path.join(tmpdir, "x_mean.npy")
+                x_std_path = os.path.join(tmpdir, "x_std.npy")
+
+                np.save(x_mean_path, trainer.x_mean)
+                np.save(x_std_path, trainer.x_std)
+
+                # Log into root of artifact store (".")
+                mlflow.log_artifact(x_mean_path, artifact_path=".")
+                mlflow.log_artifact(x_std_path, artifact_path=".")
 
         # -------------------------------
         # 6. Log model artifact
