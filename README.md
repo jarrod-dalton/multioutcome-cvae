@@ -2,93 +2,93 @@
 
 Tools for fitting and using a **Conditional Variational Autoencoder (CVAE)** for **multivariate binary outcomes**.
 
-Goal: learn a flexible model for:
-
-- **X** = covariates / predictors  
-- **Y** = vector of binary outcomes (e.g., 10 correlated Bernoulli variables)
-
-and use it to:
-
-1. Estimate **p(Y | X)** (conditional probabilities)  
-2. Generate realistic, correlated binary outcomes for new covariates.
-
 ---
 
 # Table of Contents
-- [Repository structure](#repository-structure)
-- [Installation / environment](#installation--environment)
-- [1. Native Python usage](#1-native-python-usage)
-- [2. RStudio / Posit Workbench usage via reticulate](#2-rstudio--posit-workbench-usage-via-reticulate)
-- [3. Databricks usage](#3-databricks-usage)
-  - [3a. Databricks Python notebook](#3a-databricks-python-notebook)
-  - [3b. Databricks R notebook](#3b-databricks-r-notebook)
-- [4. MLflow example](#4-mlflow-example)
-- [5. Evaluation notes](#5-evaluation-notes)
+- [Overview](#overview)
+- [Repository Structure](#repository-structure)
+- [Installation / Environment](#installation--environment)
+- [1. Native Python Usage](#1-native-python-usage)
+- [2. RStudio / Posit Workbench Usage (via reticulate)](#2-rstudio--posit-workbench-usage-via-reticulate)
+- [3. Databricks Usage](#3-databricks-usage)
+    - [3.1 Python Notebooks](#31-python-notebooks)
+    - [3.2 R Notebooks](#32-r-notebooks)
+- [4. MLflow Example](#4-mlflow-example)
+- [5. Evaluation Notes](#5-evaluation-notes)
+- [6. Self-Contained Example: `fit_cvae_with_tuning()` + MLflow (Databricks)](#6-selfcontained-example-fit_cvae_with_tuning--mlflow-databricks)
 
 ---
 
-## Repository structure
+# Overview
+
+This repository provides tools to learn the conditional distribution:
+
+- **X** = covariates  
+- **Y** = vector of binary outcomes (e.g., 10 correlated Bernoulli variables)
+
+via a **Conditional Variational Autoencoder (CVAE)**.
+
+The CVAE allows you to:
+
+1. Estimate **p(Y | X)**  
+2. Generate **realistic, correlated Y vectors** for any covariate profile  
+3. Capture latent dependence across multivariate binary outcomes  
+
+Includes:
+
+- Data simulation (`simulate_cvae_data`)
+- Flexible neural architecture (configurable hidden layers)
+- Hyperparameter tuning:
+  - Random search  
+  - TPE (Tree-structured Parzen Estimator) via `hyperopt`
+- Log-likelihood evaluation
+- Correlation heatmaps
+- MLflow training example
+- Full R / reticulate integration
+- A convenience function `fit_cvae_with_tuning()` for non-MLflow workflows
+
+---
+
+# Repository Structure
 
 ```text
 .
 ├── python
 │   └── multibin_cvae
-│       ├── __init__.py          # exposes main functions/classes
+│       ├── __init__.py
 │       ├── model.py             # CVAE model, trainer, tuning, fit_cvae_with_tuning()
 │       ├── simulate.py          # data simulation + correlation utilities
 │       └── examples
-│           └── train_with_mlflow.py  # MLflow example (Databricks-friendly)
+│           └── train_with_mlflow.py
 ├── R
-│   └── fit_cvae_example.R       # R/reticulate usage example
+│   └── fit_cvae_example.R
 └── README.md
 ```
 
-The core components are `model.py` and `simulate.py`.
-
 ---
 
-## Installation / environment
+# Installation / Environment
 
-You can use this code in:
+Can be used from:
 
-- **Native Python** (local / server)
-- **RStudio / Posit Workbench** via `reticulate`
-- **Databricks** (Python and/or R notebooks)
+- Native Python
+- RStudio / Posit Workbench (`reticulate`)
+- Databricks (Python or R notebooks)
 
-The package is “source-only.” Typical options:
-
-- Add the `python/` folder to `PYTHONPATH`
-- Or in Python:
-
-```python
-import sys
-sys.path.append("/path/to/repo/python")
-```
-
-### Dependencies
+### Python dependencies
 
 Core:
-
 - `numpy`
 - `torch`
 - `matplotlib`
 
 Optional:
-
-- `mlflow` (only if using MLflow logging)
-- `hyperopt` (only if using TPE tuning)
-
-Install example:
-
-```bash
-pip install numpy torch matplotlib mlflow hyperopt
-```
+- `mlflow` (only if tracking/logging)
+- `hyperopt` (only for TPE tuning)
 
 ---
 
-# 1. Native Python usage
-
-Below shows **both** direct training and the convenience method `fit_cvae_with_tuning()`.
+# 1. Native Python Usage
 
 ```python
 import sys
@@ -97,13 +97,11 @@ sys.path.append("/path/to/repo/python")
 from multibin_cvae import (
     simulate_cvae_data,
     train_val_test_split,
-    CVAETrainer,
     fit_cvae_with_tuning,
-    compare_real_vs_generated,
+    compare_real_vs_generated
 )
 
-# --- Simulate data ---
-X, Y, params_true = simulate_cvae_data(
+X, Y, params = simulate_cvae_data(
     n_samples=20000,
     n_features=5,
     n_outcomes=10,
@@ -111,13 +109,183 @@ X, Y, params_true = simulate_cvae_data(
     seed=1234,
 )
 
-# --- Split data ---
-splits = train_val_test_split(X, Y, train_frac=0.7, val_frac=0.15, seed=1234)
-X_train, Y_train = splits["X_train"], splits["Y_train"]
-X_val,   Y_val   = splits["X_val"],   splits["Y_val"]
-X_test,  Y_test  = splits["X_test"],  splits["Y_test"]
+search_space = {
+    "latent_dim":      [4, 8, 16],
+    "enc_hidden_dims": [[64, 64], [128, 64]],
+    "dec_hidden_dims": [[64, 64], [128, 64]],
+    "lr":              [1e-3, 5e-4],
+    "beta_kl":         [0.5, 1.0],
+    "batch_size":      [128, 256],
+    "num_epochs":      [20, 40],
+}
 
-# --- Search space for tuning ---
+fit_res = fit_cvae_with_tuning(
+    X=X,
+    Y=Y,
+    search_space=search_space,
+    method="random",
+    n_trials=10,
+    train_frac=0.8,
+    seed=1234,
+)
+
+trainer = fit_res["trainer"]
+Y_gen = trainer.generate(X[:5], n_samples_per_x=10)
+```
+
+---
+
+# 2. RStudio / Posit Workbench Usage (via `reticulate`)
+
+```r
+library(reticulate)
+mb <- import("multibin_cvae")
+
+sim <- mb$simulate_cvae_data(
+  n_samples=20000L,
+  n_features=5L,
+  n_outcomes=10L,
+  latent_dim=2L,
+  seed=1234L
+)
+
+X <- sim[[1]]
+Y <- sim[[2]]
+
+search_space <- dict(
+  latent_dim=list(4L, 8L),
+  enc_hidden_dims=list(list(64L,64L), list(128L,64L)),
+  dec_hidden_dims=list(list(64L,64L), list(128L,64L)),
+  lr=list(1e-3,5e-4),
+  beta_kl=list(0.5,1.0),
+  batch_size=list(128L,256L),
+  num_epochs=list(20L,40L)
+)
+
+fit_res <- mb$fit_cvae_with_tuning(
+  X=X, Y=Y,
+  search_space=search_space,
+  method="random",
+  n_trials=5L
+)
+
+trainer <- fit_res[["trainer"]]
+Y_gen <- trainer$generate(X[1:5,,drop=FALSE], n_samples_per_x=10L)
+```
+
+---
+
+# 3. Databricks Usage
+
+## 3.1 Python Notebooks
+
+```python
+import sys
+sys.path.append("/Workspace/Users/<your_user>/cvae_multibin/python")
+
+from multibin_cvae import simulate_cvae_data, fit_cvae_with_tuning
+```
+
+Then train normally.
+
+## 3.2 R Notebooks
+
+Use a `%python` cell first:
+
+```python
+import sys
+sys.path.append("/Workspace/Users/<your_user>/cvae_multibin/python")
+```
+
+Then in R:
+
+```r
+mb <- reticulate::import("multibin_cvae")
+```
+
+---
+
+# 4. MLflow Example
+
+See:
+```
+python/multibin_cvae/examples/train_with_mlflow.py
+```
+
+It demonstrates:
+
+- Data simulation  
+- CVAE training  
+- Logging:
+  - hyperparameters  
+  - train/val losses  
+  - correlation heatmap  
+  - PyTorch model  
+  - standardization parameters  
+
+---
+
+# 5. Evaluation Notes
+
+Two evaluation views:
+
+### 1. Log-likelihood / cross-entropy  
+`CVAETrainer.evaluate_loglik(X, Y, ...)` computes:
+
+\[
+\sum_{i,j} \left[ y_{ij}\log(p_{ij}) + (1-y_{ij})\log(1-p_{ij}) \right]
+\]
+
+with an MC estimate of \(p_{ij}\).
+
+### 2. Correlation structure  
+`compare_real_vs_generated()`  
+`summarize_binary_matrix()`
+
+Both provide masked-diagonal heatmaps for clarity.
+
+---
+
+# 6. Self-Contained Example: `fit_cvae_with_tuning()` + MLflow (Databricks)
+
+This is a **minimal reproducible** Databricks Python example that:
+
+1. Simulates data  
+2. Performs hyperparameter tuning  
+3. Refits the best model on all data  
+4. Logs the model + metrics + correlation heatmap to MLflow  
+
+Paste the whole block into a Databricks **Python notebook**:
+
+```python
+import sys
+sys.path.append("/Workspace/Users/<your_user>/cvae_multibin/python")
+
+import mlflow
+import mlflow.pytorch
+import matplotlib.pyplot as plt
+import numpy as np
+
+from multibin_cvae import (
+    simulate_cvae_data,
+    fit_cvae_with_tuning,
+    compare_real_vs_generated
+)
+
+# -------------------------------------------------------
+# 1. Simulate data
+# -------------------------------------------------------
+X, Y, params = simulate_cvae_data(
+    n_samples=20000,
+    n_features=5,
+    n_outcomes=10,
+    latent_dim=2,
+    seed=1234,
+)
+
+# -------------------------------------------------------
+# 2. Define search space for hyperparameter tuning
+# -------------------------------------------------------
 search_space = {
     "latent_dim":      [4, 8],
     "enc_hidden_dims": [[64, 64], [128, 64]],
@@ -128,237 +296,67 @@ search_space = {
     "num_epochs":      [20, 40],
 }
 
-# --- Fit CVAE with tuning ---
+# -------------------------------------------------------
+# 3. Run tuning + refit best model
+# -------------------------------------------------------
 fit_res = fit_cvae_with_tuning(
     X=X,
     Y=Y,
     search_space=search_space,
-    method="random",   # or "tpe"
-    n_trials=10,
-    train_frac=0.8,
-    seed=1234,
-)
-
-trainer = fit_res["trainer"]
-
-# --- Generate new correlated Y for test X ---
-X_new = X_test[:5]
-Y_sim = trainer.generate(X_new, n_samples_per_x=10)
-
-# --- Evaluate correlation structure ---
-Y_sim_flat = Y_sim.reshape(-1, Y_sim.shape[-1])
-compare_real_vs_generated(Y_test, Y_sim_flat, make_plot=True)
-```
-
----
-
-# 2. RStudio / Posit Workbench usage via reticulate
-
-This example uses `fit_cvae_with_tuning()` directly from R.
-
-```r
-library(reticulate)
-
-# Optional: force exact Python
-# use_python("/path/to/python", required = TRUE)
-
-mb <- import("multibin_cvae")
-
-# --- Simulate data ---
-sim <- mb$simulate_cvae_data(
-  n_samples  = 20000L,
-  n_features = 5L,
-  n_outcomes = 10L,
-  latent_dim = 2L,
-  seed       = 1234L
-)
-
-X <- sim[[1]]
-Y <- sim[[2]]
-
-# --- Search space ---
-search_space <- dict(
-  latent_dim      = list(4L, 8L),
-  enc_hidden_dims = list(list(64L, 64L), list(128L, 64L)),
-  dec_hidden_dims = list(list(64L, 64L), list(128L, 64L)),
-  lr              = list(1e-3, 5e-4),
-  beta_kl         = list(0.5, 1.0),
-  batch_size      = list(128L, 256L),
-  num_epochs      = list(20L, 40L)
-)
-
-# --- Fit with tuning ---
-fit_res <- mb$fit_cvae_with_tuning(
-  X           = X,
-  Y           = Y,
-  search_space = search_space,
-  method      = "random",
-  n_trials    = 5L,
-  train_frac  = 0.8,
-  seed        = 1234L
-)
-
-trainer <- fit_res[["trainer"]]
-
-# --- Generate ---
-Y_sim <- trainer$generate(
-  X[1:5, , drop = FALSE],
-  n_samples_per_x = 10L
-)
-
-# --- Evaluate log-likelihood on held-out ---
-ll_metrics <- trainer$evaluate_loglik(
-  X = X[1:2000, , drop = FALSE],
-  Y = Y[1:2000, , drop = FALSE],
-  n_mc = 20L
-)
-print(ll_metrics)
-```
-
-Notes:
-- Use `py_config()` to validate which Python `reticulate` is using.
-- Make sure the repo’s `python/` directory is discoverable by Python.
-
----
-
-# 3. Databricks usage
-
-## 3a. Databricks Python notebook
-
-```python
-import sys
-sys.path.append("/Workspace/Users/your.name@org.org/cvae_multibin/python")
-
-from multibin_cvae import (
-    simulate_cvae_data,
-    fit_cvae_with_tuning,
-)
-
-# Simulate data
-X, Y, params = simulate_cvae_data(
-    n_samples=20000,
-    n_features=5,
-    n_outcomes=10,
-    latent_dim=2,
-    seed=1234,
-)
-
-# Search space
-search_space = {
-    "latent_dim": [4, 8],
-    "enc_hidden_dims": [[64, 64], [128, 64]],
-    "dec_hidden_dims": [[64, 64], [128, 64]],
-    "lr": [1e-3, 5e-4],
-    "beta_kl": [0.5, 1.0],
-    "batch_size": [128, 256],
-    "num_epochs": [20, 40],
-}
-
-# Fit with tuning
-fit_res = fit_cvae_with_tuning(
-    X, Y,
-    search_space=search_space,
-    method="random",
+    method="random",  # or "tpe" if hyperopt installed
     n_trials=8,
     train_frac=0.8,
-    seed=777
+    seed=1234,
+    verbose=True,
 )
 
 trainer = fit_res["trainer"]
+best_config = fit_res["best_config"]
 
-# Generate
-Y_gen = trainer.generate(X[:10], n_samples_per_x=5)
-Y_gen
+# -------------------------------------------------------
+# 4. MLflow logging
+# -------------------------------------------------------
+experiment_name = "/Users/<your_user>/CVAE_fit_tuning"
+mlflow.set_experiment(experiment_name)
+
+with mlflow.start_run():
+
+    # Log hyperparameters
+    mlflow.log_params(best_config)
+
+    # Log standardization attributes
+    mlflow.log_dict(
+        {"x_mean": trainer.x_mean.tolist(), "x_std": trainer.x_std.tolist()},
+        "standardization.json"
+    )
+
+    # Log the trained PyTorch model
+    mlflow.pytorch.log_model(trainer.model, artifact_path="cvae_model")
+
+    # Compare real vs generated
+    Y_gen = trainer.generate(X[:2000], n_samples_per_x=1)
+    _, ax = compare_real_vs_generated(Y_real=Y[:2000], Y_gen=Y_gen, make_plot=True)
+
+    # Log heatmap
+    fig = ax.get_figure()
+    mlflow.log_figure(fig, "correlation_comparison.png")
+    plt.close(fig)
+
+    # Log evaluation metrics
+    metrics = trainer.evaluate_loglik(X=X[:2000], Y=Y[:2000], n_mc=20)
+    mlflow.log_metrics(metrics)
+
+print("Finished MLflow run.")
 ```
+
+This pipeline gives you:
+
+- Automated hyperparameter search  
+- Best-config model fit  
+- Correlation heatmap saved as MLflow artifact  
+- Log-likelihood metrics tracked  
+- Reusable model in the MLflow Model Registry  
 
 ---
 
-## 3b. Databricks R notebook
-
-First, ensure Python sees the package:
-
-**Python cell:**
-
-```python
-import sys
-sys.path.append("/Workspace/Users/your.name@org.org/cvae_multibin/python")
-```
-
-**R cell:**
-
-```r
-library(reticulate)
-py_config()
-
-mb <- import("multibin_cvae")
-
-sim <- mb$simulate_cvae_data(20000L, 5L, 10L, 2L, 1234L)
-X <- sim[[1]]; Y <- sim[[2]]
-
-search_space <- dict(
-  latent_dim = list(4L, 8L),
-  enc_hidden_dims = list(list(64L, 64L), list(128L, 64L)),
-  dec_hidden_dims = list(list(64L, 64L), list(128L, 64L)),
-  lr = list(1e-3, 5e-4),
-  beta_kl = list(0.5, 1.0),
-  batch_size = list(128L, 256L),
-  num_epochs = list(20L, 40L)
-)
-
-fit_res <- mb$fit_cvae_with_tuning(
-  X, Y,
-  search_space = search_space,
-  method = "random",
-  n_trials = 5L
-)
-
-trainer <- fit_res[["trainer"]]
-trainer$generate(X[1:5, , drop=FALSE], n_samples_per_x=10L)
-```
-
----
-
-# 4. MLflow example
-
-A complete MLflow-friendly script is provided:
-
-```
-python/multibin_cvae/examples/train_with_mlflow.py
-```
-
-It demonstrates:
-
-- Simulating or loading real data  
-- Training CVAE  
-- Logging:
-  - hyperparameters  
-  - losses  
-  - correlation heatmap (`mlflow.log_figure`)  
-  - trained model & standardization parameters  
-
-Adapt it simply by replacing the data-loading block.
-
----
-
-# 5. Evaluation notes
-
-Two evaluation styles are included:
-
-## 1. Log-likelihood / cross-entropy
-`CVAETrainer.evaluate_loglik(X, Y, ...)` computes
-
-\[
-\sum_{i,j} y_{ij} \log p_{ij} + (1-y_{ij}) \log(1-p_{ij})
-\]
-
-where \(p_{ij}\) is approximated via Monte Carlo over the latent space.
-
-## 2. Correlation fidelity
-- `summarize_binary_matrix(Y, make_plot=True)`  
-- `compare_real_vs_generated(Y_real, Y_gen, make_plot=True)`
-
-These inspect marginal probabilities and correlation structure to confirm that the CVAE captures multivariate dependencies, not just marginal distributions.
-
----
-
-End of README.
+That’s the complete README.
