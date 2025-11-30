@@ -122,11 +122,6 @@ class MultivariateOutcomeCVAE(nn.Module):
         else:
             raise ValueError("Invalid outcome_type.")
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor):
-        mu_z, logvar_z = self.encode(x, y)
-        z = self.reparameterize(mu_z, logvar_z)
-        out = self.decode(x, z)
-        return out, mu_z, logvar_z
 
 # Example usage:
 #
@@ -165,7 +160,7 @@ class CVAETrainer:
 
     - construction of encoder/decoder neural networks
     - standardization of X
-    - training loop (recon loss + KL)
+    - training loop (reconstruction + KL)
     - prediction and generation helpers
     - outcome-family-specific behavior
 
@@ -437,9 +432,9 @@ class CVAETrainer:
         self.trained = True
         return history
 
-    # --------- prediction helpers ---------
+    # --------- internal helper for MC over z ---------
     def _decode_for_X(self, X_std: np.ndarray, n_mc: int):
-        """Internal helper: Monte Carlo over z, returns lists of out dicts."""
+        """Internal helper: Monte Carlo over z, returns list of decoded outputs."""
         n = X_std.shape[0]
         x_tensor = torch.from_numpy(X_std).to(self.device)
         outs = []
@@ -451,6 +446,90 @@ class CVAETrainer:
                 outs.append(out)
         return outs
 
+    # --------- prediction: distribution parameters ---------
+    def predict_params(
+        self,
+        X: np.ndarray,
+        n_mc: int = 20,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Return predictive distribution parameters for Y | X.
+
+        bernoulli:
+            {"probs": p_ij}
+
+        gaussian:
+            {"mu": mu_pred_ij, "sigma": sigma_pred_ij}
+
+        poisson:
+            {"rate": lambda_pred_ij, "var_y": var_y_pred_ij}
+              where var_y approximates Var(Y_ij | X_i) under the mixture.
+        """
+        assert self.trained, "Model must be trained first."
+        X = np.asarray(X, dtype=np.float32)
+        X_std = self._standardize(X)
+        n = X.shape[0]
+
+        outs = self._decode_for_X(X_std, n_mc=n_mc)
+
+        if self.outcome_type == "bernoulli":
+            acc = torch.zeros((n, self.y_dim), device=self.device)
+            for out in outs:
+                logits = out["logits"]
+                probs = torch.sigmoid(logits)
+                acc += probs
+            probs = (acc / float(n_mc)).cpu().numpy()
+            return {"probs": probs}
+
+        elif self.outcome_type == "gaussian":
+            # predictive mean and variance via mixture moments
+            sum_mu = torch.zeros((n, self.y_dim), device=self.device)
+            sum_m2_plus_var = torch.zeros((n, self.y_dim), device=self.device)
+
+            for out in outs:
+                mu = out["mu"]
+                logvar = out["logvar"]
+                var = torch.exp(logvar)
+                sum_mu += mu
+                sum_m2_plus_var += var + mu ** 2
+
+            mu_pred = sum_mu / float(n_mc)
+            Ey2 = sum_m2_plus_var / float(n_mc)
+            var_pred = Ey2 - mu_pred ** 2
+            var_pred = torch.clamp(var_pred, min=1e-8)
+            sigma_pred = torch.sqrt(var_pred)
+
+            return {
+                "mu": mu_pred.cpu().numpy(),
+                "sigma": sigma_pred.cpu().numpy(),
+            }
+
+        elif self.outcome_type == "poisson":
+            # mixture of Poissons; E[Y] = E[lambda], Var[Y] = E[lambda] + Var[lambda]
+            sum_rate = torch.zeros((n, self.y_dim), device=self.device)
+            sum_rate_sq = torch.zeros((n, self.y_dim), device=self.device)
+
+            for out in outs:
+                log_rate = out["log_rate"]
+                rate = torch.exp(log_rate)
+                sum_rate += rate
+                sum_rate_sq += rate ** 2
+
+            lambda_mean = sum_rate / float(n_mc)
+            Ey_lambda2 = sum_rate_sq / float(n_mc)
+            var_lambda = Ey_lambda2 - lambda_mean ** 2
+            var_lambda = torch.clamp(var_lambda, min=0.0)
+            var_y = lambda_mean + var_lambda
+
+            return {
+                "rate": lambda_mean.cpu().numpy(),
+                "var_y": var_y.cpu().numpy(),
+            }
+
+        else:
+            raise ValueError("Invalid outcome_type.")
+
+    # --------- prediction: mean / expectation ---------
     def predict_mean(
         self,
         X: np.ndarray,
@@ -460,40 +539,18 @@ class CVAETrainer:
         Predict E[Y | X].
 
         - bernoulli: probabilities
-        - gaussian: means
-        - poisson:  rates (lambda)
+        - gaussian: predictive mean
+        - poisson:  predictive mean (rate)
         """
-        assert self.trained, "Model must be trained first."
-        X = np.asarray(X, dtype=np.float32)
-        X_std = self._standardize(X)
-        outs = self._decode_for_X(X_std, n_mc=n_mc)
-        n = X.shape[0]
-
+        params = self.predict_params(X, n_mc=n_mc)
         if self.outcome_type == "bernoulli":
-            acc = torch.zeros((n, self.y_dim), device=self.device)
-            for out in outs:
-                logits = out["logits"]
-                probs = torch.sigmoid(logits)
-                acc += probs
-            mean = acc / float(n_mc)
-
+            return params["probs"]
         elif self.outcome_type == "gaussian":
-            acc = torch.zeros((n, self.y_dim), device=self.device)
-            for out in outs:
-                acc += out["mu"]
-            mean = acc / float(n_mc)
-
+            return params["mu"]
         elif self.outcome_type == "poisson":
-            acc = torch.zeros((n, self.y_dim), device=self.device)
-            for out in outs:
-                log_rate = out["log_rate"]
-                rate = torch.exp(log_rate)
-                acc += rate
-            mean = acc / float(n_mc)
+            return params["rate"]
         else:
             raise ValueError("Invalid outcome_type.")
-
-        return mean.cpu().numpy()
 
     def predict_proba(
         self,
@@ -503,14 +560,15 @@ class CVAETrainer:
         """
         For backward compatibility: only valid for Bernoulli outcomes.
 
-        For non-Bernoulli outcome types, use predict_mean() instead.
+        For non-Bernoulli outcome types, use predict_mean() or predict_params().
         """
         if self.outcome_type != "bernoulli":
             raise ValueError(
                 "predict_proba() is only defined for outcome_type='bernoulli'. "
-                "Use predict_mean() for gaussian/poisson."
+                "Use predict_mean() or predict_params() for gaussian/poisson."
             )
-        return self.predict_mean(X, n_mc=n_mc)
+        params = self.predict_params(X, n_mc=n_mc)
+        return params["probs"]
 
     def evaluate_loglik(
         self,
@@ -522,7 +580,7 @@ class CVAETrainer:
         """
         Log-likelihood-style evaluation for Bernoulli outcomes.
 
-        For outcome_type != 'bernoulli', this is not currently implemented.
+        For outcome_type != 'bernoulli', this is currently not implemented.
         """
         if self.outcome_type != "bernoulli":
             raise NotImplementedError(
@@ -530,7 +588,8 @@ class CVAETrainer:
                 "outcome_type='bernoulli'."
             )
 
-        probs = self.predict_proba(X, n_mc=n_mc)
+        params = self.predict_params(X, n_mc=n_mc)
+        probs = params["probs"]
         Y = np.asarray(Y, dtype=np.float32)
         assert Y.shape == probs.shape
 
@@ -557,13 +616,13 @@ class CVAETrainer:
         Generate samples from p(Y | X).
 
         - bernoulli:
-            - return_probs=True : probabilities
+            - return_probs=True : probabilities (via MC mean)
             - return_probs=False: Bernoulli samples
         - gaussian:
-            - return_probs=True : means
+            - return_probs=True : predictive means
             - return_probs=False: Normal samples
         - poisson:
-            - return_probs=True : rates (lambda)
+            - return_probs=True : predictive rates (lambda)
             - return_probs=False: Poisson samples
         """
         assert self.trained, "Model must be trained first."
@@ -573,18 +632,23 @@ class CVAETrainer:
         n, x_dim = X_std.shape
         assert x_dim == self.x_dim
 
+        # When return_probs=True, use predict_params() to get distribution params
+        if return_probs:
+            params = self.predict_params(X_new, n_mc=max(n_samples_per_x, 10))
+            if self.outcome_type == "bernoulli":
+                return params["probs"]
+            elif self.outcome_type == "gaussian":
+                return params["mu"]
+            elif self.outcome_type == "poisson":
+                return params["rate"]
+            else:
+                raise ValueError("Invalid outcome_type.")
+
+        # return_probs=False: sample from predictive distribution (1 draw per z)
         self.model.eval()
         with torch.no_grad():
             x_tensor = torch.from_numpy(X_std).to(self.device)
 
-            if return_probs and self.outcome_type == "bernoulli":
-                # probabilities via MC mean
-                return self.predict_proba(X_new, n_mc=max(n_samples_per_x, 10))
-
-            if return_probs and self.outcome_type in ("gaussian", "poisson"):
-                return self.predict_mean(X_new, n_mc=max(n_samples_per_x, 10))
-
-            # return_probs=False: we actually sample
             total = n * n_samples_per_x
             x_rep = x_tensor.repeat_interleave(n_samples_per_x, dim=0)
             z = torch.randn((total, self.latent_dim), device=self.device)
@@ -606,7 +670,6 @@ class CVAETrainer:
             elif self.outcome_type == "poisson":
                 log_rate = out["log_rate"]
                 rate = torch.exp(log_rate)
-                # PyTorch Poisson takes rate (lambda)
                 pois = torch.distributions.Poisson(rate)
                 y_samples = pois.sample().cpu().numpy().astype(np.int32)
             else:
