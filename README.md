@@ -31,7 +31,7 @@ Most users will interact with:
 You can install directly from GitHub:
 
 ```bash
-pip install "git+https://github.com/<your-user>/<your-repo>.git"
+pip install "git+https://github.com/jarrod-dalton/multioutcome-cvae.git"
 ```
 
 ---
