@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multioutcome-cvae"  # pip/distribution name (see note below)
+version = "0.1.0"
+description = "Conditional variational autoencoder for multivariate outcomes (Bernoulli, Gaussian, Poisson)"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Your Name", email = "you@example.com" }
+]
+license = { text = "MIT" }
+
+# These are just metadata; adjust as you like
+keywords = ["cvae", "variational autoencoder", "multivariate", "simulation", "ML"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "numpy",
+  "torch",
+  "matplotlib",
+  "mlflow",
+  "hyperopt",
+]
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
