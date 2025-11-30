@@ -8,8 +8,10 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 
+VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson")
+
+
 class XYDataset(Dataset):
-    """Simple dataset wrapper for (X, Y) pairs."""
     def __init__(self, X: np.ndarray, Y: np.ndarray):
         assert X.ndim == 2
         assert Y.ndim == 2
@@ -24,15 +26,15 @@ class XYDataset(Dataset):
         return self.X[idx], self.Y[idx]
 
 
-class MultivariateBinaryCVAE(nn.Module):
-    """Conditional VAE for multivariate binary outcomes.
+class MultivariateOutcomeCVAE(nn.Module):
+    """
+    Conditional VAE for multivariate outcomes with selectable family:
+
+      outcome_type ∈ {"bernoulli", "gaussian", "poisson"}
 
     Encoder: q(z | x, y)
     Decoder: p(y | x, z)
     Prior:   p(z) = N(0, I)
-
-    Supports flexible hidden layer configurations via
-    enc_hidden_dims and dec_hidden_dims.
     """
 
     def __init__(
@@ -40,15 +42,18 @@ class MultivariateBinaryCVAE(nn.Module):
         x_dim: int,
         y_dim: int,
         latent_dim: int = 8,
+        outcome_type: str = "bernoulli",
         enc_hidden_dims: Optional[List[int]] = None,
         dec_hidden_dims: Optional[List[int]] = None,
     ):
         super().__init__()
+        assert outcome_type in VALID_OUTCOME_TYPES, \
+            f"outcome_type must be one of {VALID_OUTCOME_TYPES}"
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
+        self.outcome_type = outcome_type
 
-        # Defaults: two hidden layers of size 64 (backwards compatible)
         if enc_hidden_dims is None or len(enc_hidden_dims) == 0:
             enc_hidden_dims = [64, 64]
         if dec_hidden_dims is None or len(dec_hidden_dims) == 0:
@@ -57,7 +62,7 @@ class MultivariateBinaryCVAE(nn.Module):
         self.enc_hidden_dims = enc_hidden_dims
         self.dec_hidden_dims = dec_hidden_dims
 
-        # ----- Encoder: [X, Y] -> hidden -> (mu, logvar) -----
+        # ----- Encoder over [x, y] -----
         enc_input_dim = x_dim + y_dim
         self.enc_layers = nn.ModuleList()
         in_dim = enc_input_dim
@@ -69,7 +74,7 @@ class MultivariateBinaryCVAE(nn.Module):
         self.enc_mu = nn.Linear(enc_last_dim, latent_dim)
         self.enc_logvar = nn.Linear(enc_last_dim, latent_dim)
 
-        # ----- Decoder: [X, z] -> hidden -> logits(Y) -----
+        # ----- Decoder over [x, z] -----
         dec_input_dim = x_dim + latent_dim
         self.dec_layers = nn.ModuleList()
         in_dim = dec_input_dim
@@ -78,10 +83,15 @@ class MultivariateBinaryCVAE(nn.Module):
             in_dim = h_dim
         dec_last_dim = in_dim
 
-        self.dec_out = nn.Linear(dec_last_dim, y_dim)  # logits
+        if outcome_type == "bernoulli":
+            self.dec_out = nn.Linear(dec_last_dim, y_dim)  # logits
+        elif outcome_type == "gaussian":
+            self.dec_mu = nn.Linear(dec_last_dim, y_dim)
+            self.dec_logvar = nn.Linear(dec_last_dim, y_dim)
+        elif outcome_type == "poisson":
+            self.dec_log_rate = nn.Linear(dec_last_dim, y_dim)
 
     def encode(self, x: torch.Tensor, y: torch.Tensor):
-        """q(z | x, y) parameterized by MLP over [x, y]."""
         h = torch.cat([x, y], dim=1)
         for layer in self.enc_layers:
             h = F.relu(layer(h))
@@ -94,29 +104,38 @@ class MultivariateBinaryCVAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + std * eps
 
-    def decode(self, x: torch.Tensor, z: torch.Tensor):
-        """p(y | x, z) parameterized by MLP over [x, z]."""
+    def decode(self, x: torch.Tensor, z: torch.Tensor) -> Dict[str, torch.Tensor]:
         h = torch.cat([x, z], dim=1)
         for layer in self.dec_layers:
             h = F.relu(layer(h))
-        logits = self.dec_out(h)
-        return logits
+
+        if self.outcome_type == "bernoulli":
+            logits = self.dec_out(h)
+            return {"logits": logits}
+        elif self.outcome_type == "gaussian":
+            mu = self.dec_mu(h)
+            logvar = self.dec_logvar(h)
+            return {"mu": mu, "logvar": logvar}
+        elif self.outcome_type == "poisson":
+            log_rate = self.dec_log_rate(h)
+            return {"log_rate": log_rate}
+        else:
+            raise ValueError("Invalid outcome_type.")
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        mu, logvar = self.encode(x, y)
-        z = self.reparameterize(mu, logvar)
-        logits = self.decode(x, z)
-        return logits, mu, logvar
+        mu_z, logvar_z = self.encode(x, y)
+        z = self.reparameterize(mu_z, logvar_z)
+        out = self.decode(x, z)
+        return out, mu_z, logvar_z
 
 
 class CVAETrainer:
-    """High-level wrapper for training and using MultivariateBinaryCVAE.
+    """
+    High-level wrapper around MultivariateOutcomeCVAE.
 
-    Designed to be easy to call from R via reticulate, and supports
-    flexible hidden configs:
-
-    - Use enc_hidden_dims / dec_hidden_dims explicitly, OR
-    - Use hidden_dim + n_hidden_layers for simple symmetric MLPs.
+    - outcome_type: "bernoulli" (default), "gaussian", or "poisson"
+    - flexible hidden-depth via enc_hidden_dims / dec_hidden_dims OR
+      hidden_dim + n_hidden_layers
     """
 
     def __init__(
@@ -124,23 +143,24 @@ class CVAETrainer:
         x_dim: int,
         y_dim: int,
         latent_dim: int = 8,
-        # Flexible hidden config
+        outcome_type: str = "bernoulli",
         enc_hidden_dims: Optional[List[int]] = None,
         dec_hidden_dims: Optional[List[int]] = None,
         hidden_dim: int = 64,
         n_hidden_layers: int = 2,
-        # default training hyperparams
         num_epochs: int = 50,
         batch_size: int = 256,
         lr: float = 1e-3,
         beta_kl: float = 1.0,
         device: Optional[str] = None,
     ):
+        assert outcome_type in VALID_OUTCOME_TYPES, \
+            f"outcome_type must be one of {VALID_OUTCOME_TYPES}"
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
+        self.outcome_type = outcome_type
 
-        # Resolve hidden layer configs
         if enc_hidden_dims is None:
             enc_hidden_dims = [hidden_dim] * n_hidden_layers
         if dec_hidden_dims is None:
@@ -149,7 +169,6 @@ class CVAETrainer:
         self.enc_hidden_dims = enc_hidden_dims
         self.dec_hidden_dims = dec_hidden_dims
 
-        # Default training params (can override in fit())
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         self.lr = lr
@@ -159,10 +178,11 @@ class CVAETrainer:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
 
-        self.model = MultivariateBinaryCVAE(
+        self.model = MultivariateOutcomeCVAE(
             x_dim=x_dim,
             y_dim=y_dim,
             latent_dim=latent_dim,
+            outcome_type=outcome_type,
             enc_hidden_dims=enc_hidden_dims,
             dec_hidden_dims=dec_hidden_dims,
         ).to(self.device)
@@ -171,18 +191,40 @@ class CVAETrainer:
         self.x_std: Optional[np.ndarray] = None
         self.trained: bool = False
 
-    # ---- internal: standardization ----
+    # --------- standardization helpers ---------
     def _fit_standardizer(self, X_train: np.ndarray):
         mean = X_train.mean(axis=0)
         std = X_train.std(axis=0)
-        std[std < 1e-8] = 1.0  # avoid div-by-zero
+        std[std < 1e-8] = 1.0
         self.x_mean = mean.astype(np.float32)
         self.x_std = std.astype(np.float32)
 
     def _standardize(self, X: np.ndarray) -> np.ndarray:
         return (X - self.x_mean) / self.x_std
 
-    # ---- training loop ----
+    # --------- reconstruction loss by outcome family ---------
+    def _recon_loss(self, y: torch.Tensor, out: Dict[str, torch.Tensor]) -> torch.Tensor:
+        if self.outcome_type == "bernoulli":
+            logits = out["logits"]
+            return F.binary_cross_entropy_with_logits(
+                logits, y, reduction="sum"
+            )
+        elif self.outcome_type == "gaussian":
+            mu = out["mu"]
+            logvar = out["logvar"]
+            # NLL up to constant: 0.5 * (logvar + (y-mu)^2 / exp(logvar))
+            return 0.5 * torch.sum(
+                logvar + (y - mu) ** 2 / torch.exp(logvar)
+            )
+        elif self.outcome_type == "poisson":
+            log_rate = out["log_rate"]
+            rate = torch.exp(log_rate)
+            # Negative log-likelihood (up to +log(y!)) = rate - y * log_rate
+            return torch.sum(rate - y * log_rate)
+        else:
+            raise ValueError("Invalid outcome_type for recon loss.")
+
+    # --------- training ---------
     def fit(
         self,
         X_train: np.ndarray,
@@ -196,21 +238,16 @@ class CVAETrainer:
         verbose: bool = True,
         seed: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Train the CVAE on (X_train, Y_train)."""
-
-        # Resolve hyperparams (either passed-in or defaults)
         num_epochs = num_epochs if num_epochs is not None else self.num_epochs
         batch_size = batch_size if batch_size is not None else self.batch_size
         lr = lr if lr is not None else self.lr
         beta_kl = beta_kl if beta_kl is not None else self.beta_kl
 
-        # Reproducibility
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
             random.seed(seed)
 
-        # 1. Fit and apply standardization
         self._fit_standardizer(X_train)
         X_train_std = self._standardize(X_train)
 
@@ -219,7 +256,6 @@ class CVAETrainer:
         else:
             X_val_std = None
 
-        # 2. Data loaders
         train_ds = XYDataset(X_train_std, Y_train)
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
@@ -236,34 +272,31 @@ class CVAETrainer:
         for epoch in range(1, num_epochs + 1):
             self.model.train()
             train_loss_epoch = 0.0
-            n_train_batches = 0
+            n_batches = 0
 
             for xb, yb in train_loader:
                 xb = xb.to(self.device)
                 yb = yb.to(self.device)
 
                 optimizer.zero_grad()
-                logits, mu, logvar = self.model(xb, yb)
+                out, mu_z, logvar_z = self.model(xb, yb)
 
-                # Reconstruction (binary cross-entropy)
-                recon_loss = F.binary_cross_entropy_with_logits(
-                    logits, yb, reduction="sum"
+                recon_loss = self._recon_loss(yb, out)
+                kl_loss = -0.5 * torch.sum(
+                    1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                 )
-                # KL divergence
-                kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-                batch_size_curr = xb.size(0)
-                loss = (recon_loss + beta_kl * kl_loss) / batch_size_curr
+                batch_sz = xb.size(0)
+                loss = (recon_loss + beta_kl * kl_loss) / batch_sz
                 loss.backward()
                 optimizer.step()
 
                 train_loss_epoch += loss.item()
-                n_train_batches += 1
+                n_batches += 1
 
-            train_loss_epoch /= max(1, n_train_batches)
+            train_loss_epoch /= max(1, n_batches)
             history["train_loss"].append(train_loss_epoch)
 
-            # Validation
             val_loss_epoch = None
             if val_loader is not None:
                 self.model.eval()
@@ -273,15 +306,13 @@ class CVAETrainer:
                     for xb, yb in val_loader:
                         xb = xb.to(self.device)
                         yb = yb.to(self.device)
-                        logits, mu, logvar = self.model(xb, yb)
-                        recon_loss = F.binary_cross_entropy_with_logits(
-                            logits, yb, reduction="sum"
-                        )
+                        out, mu_z, logvar_z = self.model(xb, yb)
+                        recon_loss = self._recon_loss(yb, out)
                         kl_loss = -0.5 * torch.sum(
-                            1 + logvar - mu.pow(2) - logvar.exp()
+                            1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                         )
-                        batch_size_curr = xb.size(0)
-                        loss = (recon_loss + beta_kl * kl_loss) / batch_size_curr
+                        batch_sz = xb.size(0)
+                        loss = (recon_loss + beta_kl * kl_loss) / batch_sz
                         val_loss += loss.item()
                         n_val_batches += 1
 
@@ -296,46 +327,86 @@ class CVAETrainer:
                         f"val loss: {val_loss_epoch:.4f}"
                     )
                 else:
-                    print(
-                        f"Epoch {epoch:03d} | "
-                        f"train loss: {train_loss_epoch:.4f}"
-                    )
+                    print(f"Epoch {epoch:03d} | train loss: {train_loss_epoch:.4f}")
 
         self.trained = True
         return history
 
-    # ---- prediction of probabilities ----
+    # --------- prediction helpers ---------
+    def _decode_for_X(self, X_std: np.ndarray, n_mc: int):
+        """Internal helper: Monte Carlo over z, returns lists of out dicts."""
+        n = X_std.shape[0]
+        x_tensor = torch.from_numpy(X_std).to(self.device)
+        outs = []
+        self.model.eval()
+        with torch.no_grad():
+            for _ in range(n_mc):
+                z = torch.randn((n, self.latent_dim), device=self.device)
+                out = self.model.decode(x_tensor, z)
+                outs.append(out)
+        return outs
+
+    def predict_mean(
+        self,
+        X: np.ndarray,
+        n_mc: int = 20,
+    ) -> np.ndarray:
+        """
+        Predict E[Y | X].
+
+        - bernoulli: probabilities
+        - gaussian: means
+        - poisson:  rates (lambda)
+        """
+        assert self.trained, "Model must be trained first."
+        X = np.asarray(X, dtype=np.float32)
+        X_std = self._standardize(X)
+        outs = self._decode_for_X(X_std, n_mc=n_mc)
+        n = X.shape[0]
+
+        if self.outcome_type == "bernoulli":
+            acc = torch.zeros((n, self.y_dim), device=self.device)
+            for out in outs:
+                logits = out["logits"]
+                probs = torch.sigmoid(logits)
+                acc += probs
+            mean = acc / float(n_mc)
+
+        elif self.outcome_type == "gaussian":
+            acc = torch.zeros((n, self.y_dim), device=self.device)
+            for out in outs:
+                acc += out["mu"]
+            mean = acc / float(n_mc)
+
+        elif self.outcome_type == "poisson":
+            acc = torch.zeros((n, self.y_dim), device=self.device)
+            for out in outs:
+                log_rate = out["log_rate"]
+                rate = torch.exp(log_rate)
+                acc += rate
+            mean = acc / float(n_mc)
+        else:
+            raise ValueError("Invalid outcome_type.")
+
+        return mean.cpu().numpy()
+
     def predict_proba(
         self,
         X: np.ndarray,
         n_mc: int = 20,
     ) -> np.ndarray:
-        """Approximate E_z[p(Y=1 | X, z)] via Monte Carlo over z.
-
-        Returns
-        -------
-        probs : array (n, y_dim)
         """
-        assert self.trained, "Model must be trained before calling predict_proba()."
+        For backward compatibility: only valid for Bernoulli outcomes.
 
-        X = np.asarray(X, dtype=np.float32)
-        X_std = self._standardize(X)
-        n, x_dim = X_std.shape
-        assert x_dim == self.x_dim
+        For non-Bernoulli outcome types, use predict_mean() instead.
+        """
+        if self.outcome_type != "bernoulli":
+            raise ValueError(
+                "predict_proba() is only defined for outcome_type='bernoulli'. "
+                "Use predict_mean() for gaussian/poisson."
+            )
+        return self.predict_mean(X, n_mc=n_mc)
 
-        self.model.eval()
-        with torch.no_grad():
-            x_tensor = torch.from_numpy(X_std).to(self.device)
-            probs_accum = torch.zeros((n, self.y_dim), device=self.device)
-            for _ in range(n_mc):
-                z = torch.randn((n, self.latent_dim), device=self.device)
-                logits = self.model.decode(x_tensor, z)
-                probs = torch.sigmoid(logits)
-                probs_accum += probs
-            probs_mean = probs_accum / float(n_mc)
-            return probs_mean.cpu().numpy()
-
-    # ---- log-likelihood-style evaluation ----
     def evaluate_loglik(
         self,
         X: np.ndarray,
@@ -343,25 +414,22 @@ class CVAETrainer:
         n_mc: int = 20,
         eps: float = 1e-7,
     ) -> Dict[str, float]:
-        """Evaluate log-likelihood-based goodness-of-fit.
-
-        Uses an MC approximation to p_ij = E_z[p(Y_ij=1 | X_i, z)] and computes:
-
-        sum_{i,j} [Y_ij * log(p_ij) + (1 - Y_ij) * log(1 - p_ij)]
-
-        Returns
-        -------
-        dict with:
-          - 'sum_loglik'
-          - 'avg_loglik'  (per element)
-          - 'avg_bce'     (negative avg_loglik)
         """
+        Log-likelihood-style evaluation for Bernoulli outcomes.
+
+        For outcome_type != 'bernoulli', this is not currently implemented.
+        """
+        if self.outcome_type != "bernoulli":
+            raise NotImplementedError(
+                "evaluate_loglik is currently implemented only for "
+                "outcome_type='bernoulli'."
+            )
+
         probs = self.predict_proba(X, n_mc=n_mc)
         Y = np.asarray(Y, dtype=np.float32)
         assert Y.shape == probs.shape
 
         p = np.clip(probs, eps, 1.0 - eps)
-
         ll_matrix = Y * np.log(p) + (1.0 - Y) * np.log(1.0 - p)
         sum_ll = float(ll_matrix.sum())
         avg_ll = float(sum_ll / (Y.shape[0] * Y.shape[1]))
@@ -373,52 +441,79 @@ class CVAETrainer:
             "avg_bce": avg_bce,
         }
 
-    # ---- generation / simulation ----
+    # --------- generation ---------
     def generate(
         self,
         X_new: np.ndarray,
         n_samples_per_x: int = 1,
         return_probs: bool = False,
     ) -> np.ndarray:
-        """Generate Y for each row of X_new using the fitted CVAE."""
-        assert self.trained, "Model must be trained before calling generate()."
+        """
+        Generate samples from p(Y | X).
+
+        - bernoulli:
+            - return_probs=True : probabilities
+            - return_probs=False: Bernoulli samples
+        - gaussian:
+            - return_probs=True : means
+            - return_probs=False: Normal samples
+        - poisson:
+            - return_probs=True : rates (lambda)
+            - return_probs=False: Poisson samples
+        """
+        assert self.trained, "Model must be trained first."
 
         X_new = np.asarray(X_new, dtype=np.float32)
-        X_new_std = self._standardize(X_new)
-        n, x_dim = X_new_std.shape
+        X_std = self._standardize(X_new)
+        n, x_dim = X_std.shape
         assert x_dim == self.x_dim
 
         self.model.eval()
         with torch.no_grad():
-            x_tensor = torch.from_numpy(X_new_std).to(self.device)
+            x_tensor = torch.from_numpy(X_std).to(self.device)
 
-            if return_probs:
-                # Monte Carlo estimate of E[p(Y|X)]
-                n_mc = max(n_samples_per_x, 10)
-                probs_accum = torch.zeros((n, self.y_dim), device=self.device)
-                for _ in range(n_mc):
-                    z = torch.randn((n, self.latent_dim), device=self.device)
-                    logits = self.model.decode(x_tensor, z)
-                    probs = torch.sigmoid(logits)
-                    probs_accum += probs
-                probs_mean = probs_accum / n_mc
-                return probs_mean.cpu().numpy()
+            if return_probs and self.outcome_type == "bernoulli":
+                # probabilities via MC mean
+                return self.predict_proba(X_new, n_mc=max(n_samples_per_x, 10))
 
-            else:
-                total_samples = n * n_samples_per_x
-                x_rep = x_tensor.repeat_interleave(n_samples_per_x, dim=0)
-                z = torch.randn((total_samples, self.latent_dim), device=self.device)
-                logits = self.model.decode(x_rep, z)
+            if return_probs and self.outcome_type in ("gaussian", "poisson"):
+                return self.predict_mean(X_new, n_mc=max(n_samples_per_x, 10))
+
+            # return_probs=False: we actually sample
+            total = n * n_samples_per_x
+            x_rep = x_tensor.repeat_interleave(n_samples_per_x, dim=0)
+            z = torch.randn((total, self.latent_dim), device=self.device)
+            out = self.model.decode(x_rep, z)
+
+            if self.outcome_type == "bernoulli":
+                logits = out["logits"]
                 probs = torch.sigmoid(logits)
                 bern = torch.distributions.Bernoulli(probs=probs)
-                y_samples = bern.sample()
+                y_samples = bern.sample().cpu().numpy().astype(np.int32)
 
-                y_samples_np = y_samples.cpu().numpy().astype(np.int32)
+            elif self.outcome_type == "gaussian":
+                mu = out["mu"]
+                logvar = out["logvar"]
+                std = torch.exp(0.5 * logvar)
+                normal = torch.distributions.Normal(loc=mu, scale=std)
+                y_samples = normal.sample().cpu().numpy().astype(np.float32)
 
-                if n_samples_per_x == 1:
-                    return y_samples_np.reshape(n, self.y_dim)
-                else:
-                    return y_samples_np.reshape(n, n_samples_per_x, self.y_dim)
+            elif self.outcome_type == "poisson":
+                log_rate = out["log_rate"]
+                rate = torch.exp(log_rate)
+                # PyTorch Poisson takes rate (lambda)
+                pois = torch.distributions.Poisson(rate)
+                y_samples = pois.sample().cpu().numpy().astype(np.int32)
+            else:
+                raise ValueError("Invalid outcome_type.")
+
+            if n_samples_per_x == 1:
+                return y_samples.reshape(n, self.y_dim)
+            else:
+                return y_samples.reshape(n, n_samples_per_x, self.y_dim)
+
+
+# --------- tuning helpers ---------
 
 
 def tune_cvae_random_search(
@@ -430,11 +525,11 @@ def tune_cvae_random_search(
     y_dim: int,
     search_space: Dict[str, List[Any]],
     n_trials: int = 20,
+    outcome_type: str = "bernoulli",
     device: Optional[str] = None,
     base_seed: int = 1234,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Random-search hyperparameter tuning for CVAETrainer."""
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -455,6 +550,7 @@ def tune_cvae_random_search(
             x_dim=x_dim,
             y_dim=y_dim,
             latent_dim=cfg.get("latent_dim", 8),
+            outcome_type=outcome_type,
             enc_hidden_dims=cfg.get("enc_hidden_dims", None),
             dec_hidden_dims=cfg.get("dec_hidden_dims", None),
             hidden_dim=cfg.get("hidden_dim", 64),
@@ -488,12 +584,7 @@ def tune_cvae_random_search(
         else:
             val_loss = history["train_loss"][-1]
 
-        trial_result = {
-            "config": cfg,
-            "val_loss": val_loss,
-            "history": history,
-        }
-        trials.append(trial_result)
+        trials.append({"config": cfg, "val_loss": val_loss})
 
         if verbose:
             print(f"Random trial {t+1} val_loss: {val_loss:.4f}")
@@ -518,18 +609,11 @@ def tune_cvae_tpe(
     y_dim: int,
     search_space: Dict[str, List[Any]],
     n_trials: int = 20,
+    outcome_type: str = "bernoulli",
     device: Optional[str] = None,
     base_seed: int = 1234,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """TPE-based hyperparameter tuning using hyperopt.
-
-    Uses the same style search_space as tune_cvae_random_search, but
-    leverages hyperopt's Tree-structured Parzen Estimator (TPE) algo.
-
-    NOTE: Requires hyperopt to be installed:
-      pip install hyperopt
-    """
     try:
         from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
     except ImportError as e:
@@ -541,11 +625,7 @@ def tune_cvae_tpe(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Turn discrete candidate values into hp.choice spaces
-    hp_space = {}
-    for k, vals in search_space.items():
-        hp_space[k] = hp.choice(k, vals)
-
+    hp_space = {k: hp.choice(k, vals) for k, vals in search_space.items()}
     trials_hpo = Trials()
 
     def objective(cfg: Dict[str, Any]):
@@ -555,6 +635,7 @@ def tune_cvae_tpe(
             x_dim=x_dim,
             y_dim=y_dim,
             latent_dim=cfg.get("latent_dim", 8),
+            outcome_type=outcome_type,
             enc_hidden_dims=cfg.get("enc_hidden_dims", None),
             dec_hidden_dims=cfg.get("dec_hidden_dims", None),
             hidden_dim=cfg.get("hidden_dim", 64),
@@ -591,13 +672,9 @@ def tune_cvae_tpe(
         if verbose:
             print(f"TPE trial val_loss: {val_loss:.4f}")
 
-        return {
-            "loss": val_loss,
-            "status": STATUS_OK,
-            "config": cfg,
-        }
+        return {"loss": val_loss, "status": STATUS_OK, "config": cfg}
 
-    best = fmin(
+    fmin(
         fn=objective,
         space=hp_space,
         algo=tpe.suggest,
@@ -606,7 +683,6 @@ def tune_cvae_tpe(
         rstate=np.random.default_rng(base_seed),
     )
 
-    # Extract all trials in a friendly format
     trials: List[Dict[str, Any]] = []
     best_val_loss = float("inf")
     best_config: Optional[Dict[str, Any]] = None
@@ -616,7 +692,6 @@ def tune_cvae_tpe(
         cfg = result["config"]
         loss = float(result["loss"])
         trials.append({"config": cfg, "val_loss": loss})
-
         if loss < best_val_loss:
             best_val_loss = loss
             best_config = cfg
@@ -635,57 +710,18 @@ def fit_cvae_with_tuning(
     method: str = "random",
     n_trials: int = 20,
     train_frac: float = 0.8,
+    outcome_type: str = "bernoulli",
     seed: int = 1234,
     device: Optional[str] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Convenience function: split, tune, then refit on full data.
+    """
+    One-shot convenience wrapper:
 
-    This is intended for users who are *not* using MLflow. It:
-
-      1. Randomly splits X, Y into train/val.
-      2. Runs hyperparameter tuning (random or TPE).
-      3. Refits a CVAETrainer on the full dataset (train+val) using best config.
-      4. Returns the fitted trainer and tuning results.
-
-    Parameters
-    ----------
-    X, Y : np.ndarray
-        Full dataset.
-    search_space : dict
-        Dict of hyperparameter -> list of candidate values, e.g.:
-
-        {
-          "latent_dim":      [4, 8, 16],
-          "enc_hidden_dims": [[64, 64], [128, 64]],
-          "dec_hidden_dims": [[64, 64], [128, 64]],
-          "lr":              [1e-3, 5e-4],
-          "beta_kl":         [0.5, 1.0],
-          "batch_size":      [128, 256],
-          "num_epochs":      [20, 40]
-        }
-
-    method : {"random", "tpe"}
-        Tuning algorithm.
-    n_trials : int
-        Number of trials for tuning.
-    train_frac : float
-        Fraction of data used as training within tuning step (rest is val).
-    seed : int
-        RNG seed for the split.
-    device : str or None
-        "cuda" or "cpu" (None = auto).
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with:
-      - 'trainer'       : fitted CVAETrainer on full data
-      - 'best_config'   : dict of best hyperparameters
-      - 'tuning_results': dict from tune_cvae_* (trials, best_val_loss, ...)
-      - 'train_indices' : indices used for training during tuning
-      - 'val_indices'   : indices used for validation during tuning
+      1. Split X, Y into train/val
+      2. Tune hyperparameters
+      3. Refit on full dataset with best config
+      4. Return fitted trainer + tuning info
     """
     X = np.asarray(X, dtype=np.float32)
     Y = np.asarray(Y, dtype=np.float32)
@@ -693,7 +729,6 @@ def fit_cvae_with_tuning(
     n, x_dim = X.shape
     y_dim = Y.shape[1]
 
-    # Split into train/val for tuning
     rng = np.random.default_rng(seed)
     idx = np.arange(n)
     rng.shuffle(idx)
@@ -702,7 +737,7 @@ def fit_cvae_with_tuning(
     idx_val = idx[n_train:]
 
     X_train, Y_train = X[idx_train], Y[idx_train]
-    X_val,   Y_val   = X[idx_val],   Y[idx_val]
+    X_val, Y_val = X[idx_val], Y[idx_val]
 
     if method.lower() == "random":
         tuning_results = tune_cvae_random_search(
@@ -714,6 +749,7 @@ def fit_cvae_with_tuning(
             y_dim=y_dim,
             search_space=search_space,
             n_trials=n_trials,
+            outcome_type=outcome_type,
             device=device,
             base_seed=seed,
             verbose=verbose,
@@ -728,23 +764,24 @@ def fit_cvae_with_tuning(
             y_dim=y_dim,
             search_space=search_space,
             n_trials=n_trials,
+            outcome_type=outcome_type,
             device=device,
             base_seed=seed,
             verbose=verbose,
         )
     else:
-        raise ValueError("method must be 'random' or 'tpe'")
+        raise ValueError("method must be 'random' or 'tpe'.")
 
     best_config = tuning_results["best_config"]
     if verbose:
         print("\nBest config from tuning:")
         print(best_config)
 
-    # Refit on full dataset using best_config
     trainer = CVAETrainer(
         x_dim=x_dim,
         y_dim=y_dim,
         latent_dim=best_config.get("latent_dim", 8),
+        outcome_type=outcome_type,
         enc_hidden_dims=best_config.get("enc_hidden_dims", None),
         dec_hidden_dims=best_config.get("dec_hidden_dims", None),
         hidden_dim=best_config.get("hidden_dim", 64),
