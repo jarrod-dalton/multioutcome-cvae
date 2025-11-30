@@ -277,3 +277,8 @@ For concrete, runnable code, see the scripts in:
 - `R/`
 
 They are intended as living documentation of how to wire everything together in real workflows.
+
+---
+
+This project was developed with assistance from ChatGPT/GPT-4/5.
+
