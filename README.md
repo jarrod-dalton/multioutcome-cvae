@@ -2,26 +2,18 @@
 
 Tools for fitting and using a **Conditional Variational Autoencoder (CVAE)** for **multivariate outcomes**.
 
-Goal: estimate and simulate from flexible conditional distributions
+The main use case (and all quick-start examples) are for:
 
 - **X** = covariates / predictors  
-- **Y** = multivariate outcome (binary, continuous, or counts; same family per repo run)
+- **Y** = vector of **binary outcomes** (Bernoulli)  
 
 so you can:
 
-1. Estimate **p(Y | X)** (or E[Y | X])  
+1. Estimate **p(Y | X)** (via conditional probabilities)  
 2. Generate **realistic, correlated Y vectors** for new X  
-3. Evaluate fit using log-likelihood (Bernoulli) and correlation diagnostics  
+3. Evaluate fit using a log-likelihood-style score and correlation diagnostics  
 
-Includes:
-
-- Flexible CVAE model with selectable outcome family  
-- Random search and TPE hyperparameter tuning  
-- Log-likelihood evaluation (Bernoulli)  
-- Correlation/marginal diagnostic heatmaps  
-- Databricks + MLflow training example  
-- R integration via `reticulate`  
-- Convenience `fit_cvae_with_tuning()` wrapper  
+The code also supports **Gaussian** and **Poisson** outcome families; those are described in a separate section later.
 
 ---
 
@@ -29,10 +21,13 @@ Includes:
 
 - [1. Repository Structure](#1-repository-structure)  
 - [2. Installation / Environment](#2-installation--environment)  
-- [3. Basic Usage Examples (Python, R, Databricks)](#3-basic-usage-examples-python-r-databricks)  
-- [4. Evaluation Notes](#4-evaluation-notes)  
-- [5. Multiple Outcome Families for Y](#5-multiple-outcome-families-for-y)  
-- [6. Databricks + MLflow Example (with tuning)](#6-databricks--mlflow-example-with-tuning)  
+- [3. Basic Usage Examples (Bernoulli only)](#3-basic-usage-examples-bernoulli-only)  
+  - [3.1 Python](#31-python)  
+  - [3.2 R / Posit (reticulate)](#32-r--posit-reticulate)  
+  - [3.3 Databricks (Python)](#33-databricks-python)  
+- [4. Evaluation Notes (Bernoulli)](#4-evaluation-notes-bernoulli)  
+- [5. Other Outcome Families (Gaussian, Poisson)](#5-other-outcome-families-gaussian-poisson)  
+- [6. Databricks + MLflow Example (tuning + logging)](#6-databricks--mlflow-example-tuning--logging)  
 
 ---
 
@@ -45,7 +40,7 @@ Includes:
 │       ├── __init__.py
 │       ├── model.py             # CVAETrainer, tuning, fit_cvae_with_tuning()
 │       ├── simulate.py          # data simulation + correlation utilities
-│       └── examples             # (optional, for local scripts)
+│       └── examples             # optional extra scripts (not required)
 ├── R
 │   └── fit_cvae_example.R       # R/reticulate usage example
 └── README.md
@@ -54,19 +49,19 @@ Includes:
 Key modules:
 
 - `model.py` – CVAE model + trainer + tuning utilities  
-- `simulate.py` – simulated data + summary + correlation heatmaps  
+- `simulate.py` – simulated Bernoulli data + marginal/correlation summaries  
 
 ---
 
 # 2. Installation / Environment
 
-The code is *source-only* (not on PyPI). You can use it from:
+This code is **source-only** (not on PyPI). You can use it from:
 
 - Python (local/server)
 - RStudio / Posit Workbench via **reticulate**
 - Databricks (Python and R notebooks)
 
-### 2.1 Python dependencies
+## 2.1 Python dependencies
 
 Core:
 
@@ -76,29 +71,29 @@ Core:
 
 Optional:
 
-- `mlflow`   – experiment tracking (Databricks-native)
-- `hyperopt` – TPE tuning
+- `mlflow`   – for experiment tracking & model logging
+- `hyperopt` – for TPE tuning
 
-Example install:
+Example installation:
 
 ```bash
 pip install numpy torch matplotlib mlflow hyperopt
 ```
 
-### 2.2 Making `multibin_cvae` importable
+## 2.2 Making `multibin_cvae` importable
 
-#### Option A (quick)
+### Option A (quick)
 
 ```python
 import sys
-sys.path.append("/path/to/repo/python")
+sys.path.append("/path/to/your/repo/python")
 
 import multibin_cvae
 ```
 
-#### Option B (later)
+### Option B (editable install, later)
 
-Add `pyproject.toml` or `setup.cfg` and:
+After adding packaging metadata (e.g., `pyproject.toml` or `setup.cfg`):
 
 ```bash
 pip install -e python/
@@ -106,17 +101,27 @@ pip install -e python/
 
 ---
 
-# 3. Basic Usage Examples (Python, R, Databricks)
+# 3. Basic Usage Examples (Bernoulli only)
 
-## 3.1 Python (Bernoulli outcomes)
+This section shows **minimal, Bernoulli-only** examples for:
+
+- Python
+- R via `reticulate`
+- Databricks
+
+Support for other outcome families (Gaussian, Poisson) is discussed in [Section 5](#5-other-outcome-families-gaussian-poisson).
+
+---
+
+## 3.1 Python
 
 ```python
 import sys
-sys.path.append("/path/to/repo/python")
+sys.path.append("/path/to/your/repo/python")
 
 from multibin_cvae import simulate_cvae_data, CVAETrainer
 
-# simulate binary outcomes
+# Simulate multivariate Bernoulli outcomes Y
 X, Y, params = simulate_cvae_data(
     n_samples=5000,
     n_features=5,
@@ -129,61 +134,23 @@ trainer = CVAETrainer(
     x_dim=X.shape[1],
     y_dim=Y.shape[1],
     latent_dim=8,
-    outcome_type="bernoulli",      # default; explicit for clarity
-    enc_hidden_dims=[64, 64],
-    dec_hidden_dims=[64, 64],
+    outcome_type="bernoulli",      # default; explicit here for clarity
+    hidden_dim=64,
+    n_hidden_layers=2
 )
 
-trainer.fit(X, Y, verbose=True)
+history = trainer.fit(X, Y, verbose=True)
 
-# generate new binary outcomes
-Y_sim = trainer.generate(X[:10], n_samples_per_x=5)
+# Posterior-averaged probabilities p_ij = P(Y_ij = 1 | X_i)
+p_hat = trainer.predict_proba(X[:10], n_mc=30)
+
+# Simulate Bernoulli Y given these covariates
+Y_sim = trainer.generate(X[:10], n_samples_per_x=5, return_probs=False)
 ```
 
 ---
 
-## 3.2 Python (Gaussian or Poisson outcomes)
-
-```python
-from multibin_cvae import CVAETrainer
-
-# Suppose Y is continuous:
-#   outcome_type="gaussian"
-trainer_g = CVAETrainer(
-    x_dim=X.shape[1],
-    y_dim=Y.shape[1],
-    latent_dim=8,
-    outcome_type="gaussian"
-)
-trainer_g.fit(X, Y)
-
-# E[Y | X] (means)
-Y_mean = trainer_g.predict_mean(X[:10])
-
-# Gaussian samples
-Y_gauss = trainer_g.generate(X[:10], n_samples_per_x=5, return_probs=False)
-```
-
-```python
-# Suppose Y is counts:
-trainer_p = CVAETrainer(
-    x_dim=X.shape[1],
-    y_dim=Y.shape[1],
-    latent_dim=8,
-    outcome_type="poisson"
-)
-trainer_p.fit(X, Y)
-
-# Rates lambda(X)
-lambda_hat = trainer_p.predict_mean(X[:10])
-
-# Poisson samples
-Y_pois = trainer_p.generate(X[:10], n_samples_per_x=5, return_probs=False)
-```
-
----
-
-## 3.3 RStudio / Posit via reticulate (Bernoulli)
+## 3.2 R / Posit (reticulate)
 
 ```r
 library(reticulate)
@@ -193,6 +160,7 @@ library(reticulate)
 
 mb <- import("multibin_cvae")
 
+# Simulate Bernoulli data in Python, returned to R as arrays
 sim <- mb$simulate_cvae_data(
   n_samples  = 5000L,
   n_features = 5L,
@@ -205,22 +173,28 @@ X <- sim[[1]]
 Y <- sim[[2]]
 
 trainer <- mb$CVAETrainer(
-  x_dim       = ncol(X),
-  y_dim       = ncol(Y),
-  latent_dim  = 8L,
+  x_dim        = ncol(X),
+  y_dim        = ncol(Y),
+  latent_dim   = 8L,
   outcome_type = "bernoulli"
 )
 
-trainer$fit(X, Y)
+history <- trainer$fit(X, Y)
 
-Y_sim <- trainer$generate(X[1:5,], n_samples_per_x = 10L)
+# Conditional probabilities P(Y_ij = 1 | X_i)
+p_hat <- trainer$predict_proba(X[1:10, , drop = FALSE], n_mc = 30L)
+
+# Simulate new Bernoulli outcomes for these covariates
+Y_sim <- trainer$generate(
+  X[1:5, , drop = FALSE],
+  n_samples_per_x = 10L,
+  return_probs    = FALSE
+)
 ```
-
-For Gaussian/Poisson, change `outcome_type` accordingly and use `predict_mean()` for E[Y | X].
 
 ---
 
-## 3.4 Databricks (Python notebook, Bernoulli)
+## 3.3 Databricks (Python)
 
 ```python
 import sys
@@ -228,6 +202,7 @@ sys.path.append("/Workspace/Users/<user>/cvae_multibin/python")
 
 from multibin_cvae import simulate_cvae_data, CVAETrainer
 
+# Simulate Bernoulli data
 X, Y, _ = simulate_cvae_data(
     n_samples=20000,
     n_features=5,
@@ -243,27 +218,33 @@ trainer = CVAETrainer(
     outcome_type="bernoulli"
 )
 
-trainer.fit(X, Y)
+trainer.fit(X, Y, verbose=True)
+
+# Probabilities and generated outcomes
+p_hat = trainer.predict_proba(X[:10], n_mc=30)
 Y_sim = trainer.generate(X[:5], n_samples_per_x=5)
 ```
 
 ---
 
-# 4. Evaluation Notes
+# 4. Evaluation Notes (Bernoulli)
 
-Evaluation combines:
+The current evaluation tools are designed for **multivariate Bernoulli** Y.
 
-- a **log-likelihood / cross-entropy style measure** (Bernoulli only)
-- **correlation + marginal summaries** (any outcome family)
+There are two main diagnostics:
 
-## 4.1 Log-likelihood / cross-entropy (Bernoulli)
+1. A **log-likelihood / cross-entropy style** measure based on the posterior-averaged probabilities.
+2. **Correlation and marginal structure** comparisons between real and generated Y.
 
-For Bernoulli Y, with:
+## 4.1 Log-likelihood-style metric (Bernoulli)
 
-- Y: n × d matrix of 0/1 outcomes  
-- p_hat[i,j]: posterior-averaged probability E_z[p(Y[i,j]=1 | X[i], z)]
+For Bernoulli Y, let:
 
-we define:
+- `Y` be an n × d matrix of 0/1 outcomes.
+- `p_hat[i,j]` be the posterior-averaged probability  
+  `P(Y[i,j] = 1 | X[i])`, approximated via Monte Carlo over the latent `z`.
+
+We define:
 
 ```text
 LL = sum_{i=1..n} sum_{j=1..d} [
@@ -272,34 +253,46 @@ LL = sum_{i=1..n} sum_{j=1..d} [
     ]
 
 avg_LL  = LL / (n * d)
-avg_BCE = -avg_LL
+avg_BCE = -avg_LL   # "binary cross-entropy" style
 ```
 
-Computed via:
+You can compute these with:
 
 ```python
-metrics = trainer.evaluate_loglik(X_test, Y_test)
-# Only valid for outcome_type="bernoulli"
+metrics = trainer.evaluate_loglik(X_test, Y_test, n_mc=30)
+
+# metrics = {
+#   "sum_loglik": ...,
+#   "avg_loglik": ...,
+#   "avg_bce"   : ...
+# }
 ```
 
-For non-Bernoulli outcomes, `evaluate_loglik()` currently raises `NotImplementedError`.
+Currently, `evaluate_loglik()` is implemented for `outcome_type="bernoulli"` only.  
+For other families, you can use predictive means / variances and correlation diagnostics as described in the next section.
 
 ---
 
 ## 4.2 Correlation and marginal structure
 
-Regardless of outcome family, you can inspect marginals and correlations:
+Regardless of outcome family, it is important to check:
+
+- Marginal distributions of each component of Y  
+- Pairwise correlation structure (off-diagonal elements)
+
+For Bernoulli Y, you can use utilities in `simulate.py` (exposed through `__init__.py`) such as:
 
 ```python
 from multibin_cvae import summarize_binary_matrix, compare_real_vs_generated
 
-# For any numeric Y (binary, counts, continuous)
-summary_real = summarize_binary_matrix(Y_real, name="real", make_plot=True)
+# Inspect real data
+summ_real = summarize_binary_matrix(Y_real, name="real", make_plot=True)
 
-Y_gen = trainer.generate(X_real, n_samples_per_x=1)
+# Generate 1 draw per X; flatten into one big matrix
+Y_gen = trainer.generate(X_real, n_samples_per_x=1, return_probs=False)
 Y_gen_flat = Y_gen.reshape(-1, Y_gen.shape[-1])
 
-summary = compare_real_vs_generated(
+summ = compare_real_vs_generated(
     Y_real=Y_real,
     Y_gen=Y_gen_flat,
     label_real="real",
@@ -308,88 +301,139 @@ summary = compare_real_vs_generated(
 )
 ```
 
-Plots:
+These create:
 
-- marginal prevalence/means  
-- side-by-side correlation heatmaps (diagonal masked)  
+- Marginal prevalence plots  
+- Side-by-side correlation heatmaps (diagonal masked)  
 
-These are especially useful for checking **joint dependence structure**.
+and help assess whether the CVAE is capturing **joint dependence**, not just marginal means.
 
 ---
 
-# 5. Multiple Outcome Families for Y
+# 5. Other Outcome Families (Gaussian, Poisson)
 
-The repo now supports three outcome families, applied uniformly across the components of Y:
+Beyond Bernoulli Y, the core `CVAETrainer` supports:
 
-- `"bernoulli"` – binary outcomes (0/1)  
-- `"gaussian"`  – continuous outcomes  
-- `"poisson"`   – count outcomes  
+- `outcome_type="gaussian"` – for continuous Y  
+- `outcome_type="poisson"`  – for count Y  
 
-### 5.1 Selecting outcome_type
+The decoder and loss functions adapt accordingly, and the trainer provides a general **distribution-parameter API** via `predict_params()`.
 
-In all high-level APIs:
+## 5.1 Decoder parameterization
 
-- `CVAETrainer(...)`
-- `tune_cvae_random_search(...)`
-- `tune_cvae_tpe(...)`
-- `fit_cvae_with_tuning(...)`
+Given `(X, Z)`, the decoder models:
 
-you can set:
+- Bernoulli:
+  - outputs logits `logit_ij`
+  - `P(Y_ij = 1 | X_i, Z) = sigmoid(logit_ij)`
+- Gaussian:
+  - outputs mean `mu_ij` and log-variance `logvar_ij`
+  - `Y_ij | X_i, Z ∼ Normal(mu_ij, exp(logvar_ij))`
+- Poisson:
+  - outputs log-rate `log_rate_ij`
+  - `Y_ij | X_i, Z ∼ Poisson(lambda_ij)` where `lambda_ij = exp(log_rate_ij)`
 
-```python
-outcome_type="bernoulli"  # default
-outcome_type="gaussian"
-outcome_type="poisson"
-```
-
-### 5.2 Decoder parameterization
-
-Internally, the decoder uses:
-
-- Bernoulli: logits  
-- Gaussian: mean `mu` and log-variance `logvar`  
-- Poisson: log-rate `log_rate`
-
-Reconstruction losses are the negative log-likelihoods (up to additive constants):
+The training loss uses the corresponding negative log-likelihoods (up to constants):
 
 - Bernoulli: binary cross-entropy  
-- Gaussian: 0.5 * [ logvar + (y-mu)^2 / exp(logvar) ]  
+- Gaussian: 0.5 * [logvar + (y - mu)^2 / exp(logvar)]  
 - Poisson:  rate - y * log_rate  
-
-### 5.3 Prediction helpers
-
-- `predict_mean(X, n_mc)`  
-  - Bernoulli: returns probabilities  
-  - Gaussian: returns means  
-  - Poisson:  returns rates λ  
-
-- `predict_proba(X, n_mc)`  
-  - **Only** defined for `outcome_type="bernoulli"`  
-  - For Gaussian/Poisson, it raises an error; use `predict_mean()` instead.
-
-- `generate(X, n_samples_per_x, return_probs)`  
-  - Bernoulli:
-    - `return_probs=True` → probabilities (via MC mean)  
-    - `return_probs=False` → Bernoulli samples  
-  - Gaussian:
-    - `return_probs=True` → means  
-    - `return_probs=False` → Normal samples  
-  - Poisson:
-    - `return_probs=True` → rates λ  
-    - `return_probs=False` → Poisson samples  
-
-This keeps Bernoulli behavior backwards-compatible while generalizing to other Y families.
 
 ---
 
-# 6. Databricks + MLflow Example (with tuning)
+## 5.2 `predict_params()`: a GLM-like interface
 
-This is a self-contained Databricks Python notebook sketch that:
+To mirror the idea of `predict.glm(type="link"/"response")`, the trainer provides:
 
-1. Imports the repo  
-2. Simulates (or loads) data  
-3. Runs hyperparameter tuning via `fit_cvae_with_tuning()`  
-4. Logs metrics and artifacts to MLflow  
+```python
+params = trainer.predict_params(X_test, n_mc=20)
+```
+
+This returns a dictionary with predictive distribution parameters for **Y | X**, marginalizing over the latent Z by Monte Carlo:
+
+- For Bernoulli:
+  ```python
+  params = {
+      "probs": p_hat  # shape (n, d)
+  }
+  ```
+- For Gaussian:
+  ```python
+  params = {
+      "mu":    mu_pred,    # predictive mean, shape (n, d)
+      "sigma": sigma_pred  # predictive SD,   shape (n, d)
+  }
+  ```
+  where `mu_pred` and `sigma_pred` use the mixture-of-Gaussians moment formulas:
+  - mu_pred ≈ E[mu_k]
+  - sigma_pred^2 ≈ E[ var_k + mu_k^2 ] - (E[mu_k])^2
+
+- For Poisson:
+  ```python
+  params = {
+      "rate":  lambda_pred,  # E[lambda | X], shape (n, d)
+      "var_y": var_y_pred    # Var(Y | X),    shape (n, d)
+  }
+  ```
+  where `var_y_pred` accounts for both E[lambda] and Var[lambda]
+  under the mixture.
+
+For convenience, `predict_mean()` is built on top of `predict_params()`:
+
+```python
+# For Bernoulli: probabilities
+# For Gaussian: predictive mean
+# For Poisson:  predictive mean rate
+mean_y = trainer.predict_mean(X_test, n_mc=20)
+```
+
+And for Bernoulli only, `predict_proba()` acts as a synonym for probabilities:
+
+```python
+p_hat = trainer.predict_proba(X_test, n_mc=20)  # outcome_type="bernoulli"
+```
+
+For Gaussian or Poisson, `predict_proba()` raises an error and you should use `predict_mean()` or `predict_params()`.
+
+---
+
+## 5.3 Sampling from the predictive distribution
+
+The `generate()` method samples from the predictive distribution `p(Y | X)`:
+
+```python
+Y_sim = trainer.generate(
+    X_new,
+    n_samples_per_x=5,
+    return_probs=False
+)
+```
+
+Behavior by family:
+
+- Bernoulli:
+  - `return_probs=True`  → probabilities P(Y_ij = 1 | X_i)  
+  - `return_probs=False` → Bernoulli samples (0/1)  
+- Gaussian:
+  - `return_probs=True`  → predictive means (mu_pred)  
+  - `return_probs=False` → Normal draws using the decoder parameters  
+- Poisson:
+  - `return_probs=True`  → predictive rates (lambda_pred)  
+  - `return_probs=False` → Poisson draws
+
+You can combine these with correlation and marginal diagnostics to validate models for non-Bernoulli Y, even though `evaluate_loglik()` is currently implemented for Bernoulli only.
+
+---
+
+# 6. Databricks + MLflow Example (tuning + logging)
+
+This section shows a **Databricks Python** example that:
+
+1. Imports `multibin_cvae` from your workspace
+2. Simulates Bernoulli data
+3. Runs hyperparameter tuning via `fit_cvae_with_tuning()`
+4. Evaluates fit
+5. Logs parameters, metrics, and correlation plots to MLflow
 
 ## 6.1 Setup
 
@@ -410,7 +454,7 @@ from multibin_cvae import (
 ## 6.2 Data
 
 ```python
-X, Y, params = simulate_cvae_data(
+X, Y, params_true = simulate_cvae_data(
     n_samples=20000,
     n_features=5,
     n_outcomes=10,
@@ -452,7 +496,7 @@ with mlflow.start_run(run_name="cvae_tuned_bernoulli") as run:
         X=X,
         Y=Y,
         search_space=search_space,
-        method="random",
+        method="random",       # or "tpe" if hyperopt is installed
         n_trials=8,
         train_frac=0.8,
         outcome_type=outcome_type,
@@ -464,18 +508,18 @@ with mlflow.start_run(run_name="cvae_tuned_bernoulli") as run:
     best_cfg = res["best_config"]
     mlflow.log_params(best_cfg)
 
-    # log-likelihood metrics (Bernoulli only)
+    # Bernoulli log-likelihood metrics on a test subset
     test_idx = np.random.choice(X.shape[0], 3000, replace=False)
-    metrics = trainer.evaluate_loglik(X[test_idx], Y[test_idx])
+    metrics = trainer.evaluate_loglik(X[test_idx], Y[test_idx], n_mc=30)
     mlflow.log_metrics(metrics)
 
-    # correlation heatmap for test vs generated
-    Y_gen = trainer.generate(X[test_idx], n_samples_per_x=1)
-    Y_gen = Y_gen.reshape(-1, Y_gen.shape[-1])
+    # Correlation comparison: real vs generated on test subset
+    Y_gen = trainer.generate(X[test_idx], n_samples_per_x=1, return_probs=False)
+    Y_gen_flat = Y_gen.reshape(-1, Y_gen.shape[-1])
 
     comp = compare_real_vs_generated(
         Y_real=Y[test_idx],
-        Y_gen=Y_gen,
+        Y_gen=Y_gen_flat,
         label_real="test",
         label_gen="generated",
         make_plot=True
@@ -485,13 +529,11 @@ with mlflow.start_run(run_name="cvae_tuned_bernoulli") as run:
         mlflow.log_figure(fig, "corr_test_vs_generated.png")
         plt.close(fig)
 
-    # save model only (preprocessing can be stored separately)
+    # Log the trained PyTorch model (decoder+encoder) as an MLflow artifact
     mlflow.pytorch.log_model(trainer.model, "model")
 
     print("Run ID:", run.info.run_id)
 ```
 
-You can swap in real X, Y (e.g., from Snowflake / Delta tables) and choose a different `outcome_type` as needed. For non-Bernoulli families, you’d typically log:
+You can later swap in **real X, Y** instead of simulated data, and/or change the outcome family (`outcome_type`) as your use-cases evolve.
 
-- `predict_mean`-based metrics (MSE, Poisson deviance, etc.)  
-- correlation heatmaps and marginals rather than the Bernoulli log-likelihood.
