@@ -26,7 +26,17 @@ Most users will interact with:
 
 ---
 
-## 1. Quick start (Python, Bernoulli)
+## 1. Installation
+
+You can install directly from GitHub:
+
+```bash
+pip install "git+https://github.com/<your-user>/<your-repo>.git"
+```
+
+---
+
+## 2. Quick start (Python, Bernoulli)
 
 Minimal end-to-end example using **simulated multivariate Bernoulli** data:
 
@@ -76,7 +86,7 @@ For more detailed examples (plots, tuning, MLflow, etc.), see the scripts under 
 
 ---
 
-## 2. Repository layout
+## 3. Repository layout
 
 ```text
 .
@@ -93,7 +103,7 @@ For more detailed examples (plots, tuning, MLflow, etc.), see the scripts under 
 
 ---
 
-## 3. Python examples
+## 4. Python examples
 
 All examples are runnable as:
 
@@ -103,7 +113,7 @@ python -m multibin_cvae.examples.<script_name>
 
 from within `python/`’s parent directory (or any location where `multibin_cvae` is importable).
 
-### 3.1 Hello world examples
+### 4.1 Hello world examples
 
 **Multivariate Bernoulli**:
 
@@ -133,7 +143,7 @@ These scripts are intended as small, readable “starting points” rather than 
 
 ---
 
-### 3.2 MLflow training + tuning
+### 4.2 MLflow training + tuning
 
 **Train and log a model to MLflow**:
 
@@ -152,7 +162,7 @@ You get back an MLflow run ID that can be used for downstream inference.
 
 ---
 
-### 3.3 Loading a model from MLflow (Python)
+### 4.3 Loading a model from MLflow (Python)
 
 **Use a model stored in MLflow for new predictions / simulations**:
 
@@ -170,7 +180,7 @@ This is the “Python consumer” side of the MLflow run created by `train_with_
 
 ---
 
-## 4. Outcome families
+## 5. Outcome families
 
 The core `CVAETrainer` supports three outcome types:
 
@@ -192,7 +202,7 @@ For all three families, the cross-dimension dependence in Y is induced through t
 
 ---
 
-## 5. R integration
+## 6. R integration
 
 Two R scripts (using **reticulate**) live under `R/`:
 
@@ -219,7 +229,7 @@ These provide a template for an **R-facing front end** that uses:
 
 ---
 
-## 6. Databricks + MLflow
+## 7. Databricks + MLflow
 
 On Databricks, the typical workflow is:
 
@@ -234,7 +244,7 @@ On Databricks, the typical workflow is:
 
 ---
 
-## 7. Tests
+## 8. Tests
 
 This repository includes a small `/tests` directory with PyTest-based unit tests covering:
 
@@ -261,7 +271,7 @@ The tests are designed to be stable across platforms and catch API regressions w
 
 ---
 
-## 8. Examples
+## 9. Examples
 
 For concrete, runnable code, see the scripts in:
 
