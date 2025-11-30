@@ -232,6 +232,37 @@ On Databricks, the typical workflow is:
    - `fit_cvae_example.R` for direct training in a shared environment
    - `use_mlflow_model.R` to consume MLflow-stored models
 
+---
+
+## 7. Tests
+
+This repository includes a small `/tests` directory with PyTest-based unit tests covering:
+
+- simulator behavior (Bernoulli / Gaussian / Poisson)
+- log-likelihood utilities
+- CVAETrainer forward pass, training, prediction, and generation
+- end-to-end “smoke tests” for tiny models
+
+Tests can be run locally with:
+
+```bash
+pytest -q
+```
+
+On Databricks, you can run:
+
+```python
+%sh
+pip install pytest
+pytest /Workspace/Users/<you>/cvae_multibin/tests -q
+```
+
+The tests are designed to be stable across platforms and catch API regressions without over-constraining stochastic model behavior.
+
+---
+
+## 8. Examples
+
 For concrete, runnable code, see the scripts in:
 
 - `python/multibin_cvae/examples/`
