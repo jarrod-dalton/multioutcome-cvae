@@ -128,14 +128,119 @@ class MultivariateOutcomeCVAE(nn.Module):
         out = self.decode(x, z)
         return out, mu_z, logvar_z
 
-
+# Example usage:
+#
+# from multibin_cvae import CVAETrainer
+#
+# trainer = CVAETrainer(
+#     x_dim=5,                 # 5 covariates in X
+#     y_dim=10,                # 10-dimensional outcome vector Y
+#     latent_dim=8,            # 8-dimensional latent space Z
+#     outcome_type="bernoulli",# type of Y: "bernoulli", "gaussian", or "poisson"
+#
+#     # Option 1 (simple): use symmetric hidden layers
+#     hidden_dim=64,           # size of each hidden layer
+#     n_hidden_layers=2,       # number of hidden layers in encoder & decoder
+#     # enc_hidden_dims=None,  # -> will default to [hidden_dim] * n_hidden_layers
+#     # dec_hidden_dims=None,  # -> same as encoder by default
+#
+#     # Option 2 (explicit): uncomment to override defaults
+#     # enc_hidden_dims=[128, 64],
+#     # dec_hidden_dims=[128, 64],
+#
+#     num_epochs=50,           # training epochs (can override in .fit)
+#     batch_size=256,          # mini-batch size (can override in .fit)
+#     lr=1e-3,                 # learning rate (can override in .fit)
+#     beta_kl=1.0,             # KL tradeoff parameter (beta-VAE style)
+#     device=None              # "cuda", "cpu", or None for auto-detect
+# )
+#
+# trainer.fit(X_train, Y_train)
+#
 class CVAETrainer:
     """
-    High-level wrapper around MultivariateOutcomeCVAE.
+    CVAETrainer
 
-    - outcome_type: "bernoulli" (default), "gaussian", or "poisson"
-    - flexible hidden-depth via enc_hidden_dims / dec_hidden_dims OR
-      hidden_dim + n_hidden_layers
+    High-level wrapper around MultivariateOutcomeCVAE. Handles:
+
+    - construction of encoder/decoder neural networks
+    - standardization of X
+    - training loop (recon loss + KL)
+    - prediction and generation helpers
+    - outcome-family-specific behavior
+
+    Parameters
+    ----------
+    x_dim : int
+        Number of columns in X (dimensionality of the covariate vector).
+        Must match X.shape[1] used in fit().
+
+    y_dim : int
+        Number of columns in Y (dimensionality of the outcome vector).
+        Must match Y.shape[1] used in fit().
+
+    latent_dim : int, default=8
+        Dimension of the latent variable Z. Larger values increase
+        flexibility but also model complexity.
+
+    outcome_type : {"bernoulli", "gaussian", "poisson"}, default="bernoulli"
+        Distributional family for Y given (X, Z):
+          - "bernoulli": binary outcomes (0/1); decoder outputs logits
+          - "gaussian" : continuous outcomes; decoder outputs (mu, logvar)
+          - "poisson"  : count outcomes; decoder outputs log-rate (log lambda)
+
+    enc_hidden_dims : list[int] or None, default=None
+        Explicit sizes of the hidden layers in the encoder MLP.
+        Example: [128, 64] creates two encoder layers:
+          (x,y) -> 128 -> 64 -> latent params.
+        If None, defaults to [hidden_dim] * n_hidden_layers.
+
+    dec_hidden_dims : list[int] or None, default=None
+        Explicit sizes of the hidden layers in the decoder MLP.
+        Example: [128, 64] creates two decoder layers:
+          (x,z) -> 128 -> 64 -> output params.
+        If None, defaults to enc_hidden_dims (symmetric encoder/decoder).
+
+    hidden_dim : int, default=64
+        Convenience parameter used only when enc_hidden_dims or
+        dec_hidden_dims are not provided. In that case:
+          enc_hidden_dims = [hidden_dim] * n_hidden_layers
+          dec_hidden_dims = enc_hidden_dims
+
+        If you pass enc_hidden_dims/dec_hidden_dims explicitly, hidden_dim
+        and n_hidden_layers are ignored for those networks.
+
+    n_hidden_layers : int, default=2
+        Convenience parameter controlling how many hidden layers to use
+        when enc_hidden_dims/dec_hidden_dims are not given explicitly.
+        For example:
+          hidden_dim=64, n_hidden_layers=3
+        implies:
+          enc_hidden_dims = [64, 64, 64]
+          dec_hidden_dims = [64, 64, 64]
+
+    num_epochs : int, default=50
+        Default number of training epochs. You can override this in the
+        .fit(...) call via the num_epochs argument.
+
+    batch_size : int, default=256
+        Default mini-batch size used by the DataLoader. Can be overridden
+        in .fit(...).
+
+    lr : float, default=1e-3
+        Default learning rate for Adam optimizer. Can be overridden
+        in .fit(...).
+
+    beta_kl : float, default=1.0
+        Weight on the KL divergence term. Values > 1.0 approximate a
+        "beta-VAE" style objective with stronger regularization on Z;
+        values < 1.0 put more weight on reconstruction.
+
+    device : {"cuda", "cpu"} or None, default=None
+        Device to run the model on:
+          - "cuda": use GPU if available
+          - "cpu" : force CPU
+          - None  : auto-detect ("cuda" if available, else "cpu").
     """
 
     def __init__(
