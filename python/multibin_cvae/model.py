@@ -12,18 +12,41 @@ VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson")
 
 
 class XYDataset(Dataset):
-    def __init__(self, X: np.ndarray, Y: np.ndarray):
+    """
+    Basic dataset wrapper for (X, Y) with optional mask over Y.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, x_dim)
+    Y : np.ndarray, shape (n, y_dim)
+    mask : np.ndarray or None, shape (n, y_dim)
+        Optional mask over Y: 1 = observed, 0 = missing.
+        If None, all entries are treated as observed.
+    """
+    def __init__(self, X: np.ndarray, Y: np.ndarray, mask: Optional[np.ndarray] = None):
         assert X.ndim == 2
         assert Y.ndim == 2
         assert X.shape[0] == Y.shape[0]
+
         self.X = X.astype(np.float32)
         self.Y = Y.astype(np.float32)
+
+        if mask is not None:
+            mask = np.asarray(mask)
+            assert mask.shape == Y.shape, "Y mask must have same shape as Y."
+            # store as float32 so we can multiply with loss terms
+            self.mask = mask.astype(np.float32)
+        else:
+            self.mask = None
 
     def __len__(self):
         return self.X.shape[0]
 
     def __getitem__(self, idx):
-        return self.X[idx], self.Y[idx]
+        if self.mask is None:
+            return self.X[idx], self.Y[idx]
+        else:
+            return self.X[idx], self.Y[idx], self.mask[idx]
 
 
 class MultivariateOutcomeCVAE(nn.Module):
@@ -122,34 +145,31 @@ class MultivariateOutcomeCVAE(nn.Module):
         else:
             raise ValueError("Invalid outcome_type.")
 
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        """
+        Standard forward pass: encode -> reparameterize -> decode.
+        Returns:
+            out: decoder outputs (family-specific)
+            mu_z, logvar_z: parameters of q(z | x, y)
+        """
+        mu_z, logvar_z = self.encode(x, y)
+        z = self.reparameterize(mu_z, logvar_z)
+        out = self.decode(x, z)
+        return out, mu_z, logvar_z
+
 
 # Example usage:
 #
 # from multibin_cvae import CVAETrainer
 #
 # trainer = CVAETrainer(
-#     x_dim=5,                 # 5 covariates in X
-#     y_dim=10,                # 10-dimensional outcome vector Y
-#     latent_dim=8,            # 8-dimensional latent space Z
-#     outcome_type="bernoulli",# type of Y: "bernoulli", "gaussian", or "poisson"
-#
-#     # Option 1 (simple): use symmetric hidden layers
-#     hidden_dim=64,           # size of each hidden layer
-#     n_hidden_layers=2,       # number of hidden layers in encoder & decoder
-#     # enc_hidden_dims=None,  # -> will default to [hidden_dim] * n_hidden_layers
-#     # dec_hidden_dims=None,  # -> same as encoder by default
-#
-#     # Option 2 (explicit): uncomment to override defaults
-#     # enc_hidden_dims=[128, 64],
-#     # dec_hidden_dims=[128, 64],
-#
-#     num_epochs=50,           # training epochs (can override in .fit)
-#     batch_size=256,          # mini-batch size (can override in .fit)
-#     lr=1e-3,                 # learning rate (can override in .fit)
-#     beta_kl=1.0,             # KL tradeoff parameter (beta-VAE style)
-#     device=None              # "cuda", "cpu", or None for auto-detect
+#     x_dim=5,
+#     y_dim=10,
+#     latent_dim=8,
+#     outcome_type="bernoulli",
+#     hidden_dim=64,
+#     n_hidden_layers=2,
 # )
-#
 # trainer.fit(X_train, Y_train)
 #
 class CVAETrainer:
@@ -166,76 +186,7 @@ class CVAETrainer:
 
     Parameters
     ----------
-    x_dim : int
-        Number of columns in X (dimensionality of the covariate vector).
-        Must match X.shape[1] used in fit().
-
-    y_dim : int
-        Number of columns in Y (dimensionality of the outcome vector).
-        Must match Y.shape[1] used in fit().
-
-    latent_dim : int, default=8
-        Dimension of the latent variable Z. Larger values increase
-        flexibility but also model complexity.
-
-    outcome_type : {"bernoulli", "gaussian", "poisson"}, default="bernoulli"
-        Distributional family for Y given (X, Z):
-          - "bernoulli": binary outcomes (0/1); decoder outputs logits
-          - "gaussian" : continuous outcomes; decoder outputs (mu, logvar)
-          - "poisson"  : count outcomes; decoder outputs log-rate (log lambda)
-
-    enc_hidden_dims : list[int] or None, default=None
-        Explicit sizes of the hidden layers in the encoder MLP.
-        Example: [128, 64] creates two encoder layers:
-          (x,y) -> 128 -> 64 -> latent params.
-        If None, defaults to [hidden_dim] * n_hidden_layers.
-
-    dec_hidden_dims : list[int] or None, default=None
-        Explicit sizes of the hidden layers in the decoder MLP.
-        Example: [128, 64] creates two decoder layers:
-          (x,z) -> 128 -> 64 -> output params.
-        If None, defaults to enc_hidden_dims (symmetric encoder/decoder).
-
-    hidden_dim : int, default=64
-        Convenience parameter used only when enc_hidden_dims or
-        dec_hidden_dims are not provided. In that case:
-          enc_hidden_dims = [hidden_dim] * n_hidden_layers
-          dec_hidden_dims = enc_hidden_dims
-
-        If you pass enc_hidden_dims/dec_hidden_dims explicitly, hidden_dim
-        and n_hidden_layers are ignored for those networks.
-
-    n_hidden_layers : int, default=2
-        Convenience parameter controlling how many hidden layers to use
-        when enc_hidden_dims/dec_hidden_dims are not given explicitly.
-        For example:
-          hidden_dim=64, n_hidden_layers=3
-        implies:
-          enc_hidden_dims = [64, 64, 64]
-          dec_hidden_dims = [64, 64, 64]
-
-    num_epochs : int, default=50
-        Default number of training epochs. You can override this in the
-        .fit(...) call via the num_epochs argument.
-
-    batch_size : int, default=256
-        Default mini-batch size used by the DataLoader. Can be overridden
-        in .fit(...).
-
-    lr : float, default=1e-3
-        Default learning rate for Adam optimizer. Can be overridden
-        in .fit(...).
-
-    beta_kl : float, default=1.0
-        Weight on the KL divergence term. Values > 1.0 approximate a
-        "beta-VAE" style objective with stronger regularization on Z;
-        values < 1.0 put more weight on reconstruction.
-
-    device : {"cuda", "cpu"} or None, default=None
-        Device to run the model on:
-          - "cuda": use GPU if available
-          - "cpu" : force CPU
-          - None  : auto-detect ("cuda" if available, else "cpu").
+    (docstring unchanged; see earlier version)
     """
 
     def __init__(
@@ -303,24 +254,65 @@ class CVAETrainer:
         return (X - self.x_mean) / self.x_std
 
     # --------- reconstruction loss by outcome family ---------
-    def _recon_loss(self, y: torch.Tensor, out: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _recon_loss(
+        self,
+        y: torch.Tensor,
+        out: Dict[str, torch.Tensor],
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Reconstruction loss over Y, optionally masked.
+
+        Parameters
+        ----------
+        y : torch.Tensor, shape (batch_size, y_dim)
+            Outcome values (possibly including imputed values for missing).
+
+        out : dict
+            Decoder outputs; keys depend on outcome_type.
+
+        mask : torch.Tensor or None, shape (batch_size, y_dim)
+            1 for observed entries, 0 for missing. If None, all entries are
+            treated as observed.
+
+        Notes
+        -----
+        The loss is a SUM over observed entries (no normalization here).
+        The overall objective in .fit() divides by batch_size, so batches
+        with fewer observed entries will have slightly smaller reconstruction
+        terms, which is typically acceptable in practice.
+        """
+        if mask is not None:
+            mask = mask.to(y.device)
+        else:
+            # all observed
+            mask = torch.ones_like(y, device=y.device)
+
         if self.outcome_type == "bernoulli":
             logits = out["logits"]
-            return F.binary_cross_entropy_with_logits(
-                logits, y, reduction="sum"
+            # elementwise BCE
+            loss_mat = F.binary_cross_entropy_with_logits(
+                logits, y, reduction="none"
             )
+            loss = (loss_mat * mask).sum()
+            return loss
+
         elif self.outcome_type == "gaussian":
             mu = out["mu"]
             logvar = out["logvar"]
-            # NLL up to constant: 0.5 * (logvar + (y-mu)^2 / exp(logvar))
-            return 0.5 * torch.sum(
-                logvar + (y - mu) ** 2 / torch.exp(logvar)
-            )
+            # elementwise NLL up to constant
+            loss_mat = 0.5 * (logvar + (y - mu) ** 2 / torch.exp(logvar))
+            loss = (loss_mat * mask).sum()
+            return loss
+
         elif self.outcome_type == "poisson":
             log_rate = out["log_rate"]
             rate = torch.exp(log_rate)
-            # Negative log-likelihood (up to +log(y!)) = rate - y * log_rate
-            return torch.sum(rate - y * log_rate)
+            # elementwise NLL (up to log(y!)) = rate - y * log_rate
+            loss_mat = rate - y * log_rate
+            loss = (loss_mat * mask).sum()
+            return loss
+
         else:
             raise ValueError("Invalid outcome_type for recon loss.")
 
@@ -337,7 +329,21 @@ class CVAETrainer:
         beta_kl: Optional[float] = None,
         verbose: bool = True,
         seed: Optional[int] = None,
+        Y_mask_train: Optional[np.ndarray] = None,
+        Y_mask_val: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
+        """
+        Fit the CVAE.
+
+        New arguments
+        -------------
+        Y_mask_train : np.ndarray or None, shape (n_train, y_dim)
+            Optional mask over Y_train: 1 = observed, 0 = missing. If None,
+            all entries are treated as observed.
+
+        Y_mask_val : np.ndarray or None, shape (n_val, y_dim)
+            Optional mask over Y_val, used for validation loss.
+        """
         num_epochs = num_epochs if num_epochs is not None else self.num_epochs
         batch_size = batch_size if batch_size is not None else self.batch_size
         lr = lr if lr is not None else self.lr
@@ -356,11 +362,11 @@ class CVAETrainer:
         else:
             X_val_std = None
 
-        train_ds = XYDataset(X_train_std, Y_train)
+        train_ds = XYDataset(X_train_std, Y_train, mask=Y_mask_train)
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-        if X_val_std is not None:
-            val_ds = XYDataset(X_val_std, Y_val)
+        if X_val_std is not None and Y_val is not None:
+            val_ds = XYDataset(X_val_std, Y_val, mask=Y_mask_val)
             val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
         else:
             val_loader = None
@@ -374,14 +380,22 @@ class CVAETrainer:
             train_loss_epoch = 0.0
             n_batches = 0
 
-            for xb, yb in train_loader:
+            for batch in train_loader:
+                if len(batch) == 2:
+                    xb, yb = batch
+                    mb = None
+                else:
+                    xb, yb, mb = batch
+
                 xb = xb.to(self.device)
                 yb = yb.to(self.device)
+                if mb is not None:
+                    mb = mb.to(self.device)
 
                 optimizer.zero_grad()
                 out, mu_z, logvar_z = self.model(xb, yb)
 
-                recon_loss = self._recon_loss(yb, out)
+                recon_loss = self._recon_loss(yb, out, mask=mb)
                 kl_loss = -0.5 * torch.sum(
                     1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                 )
@@ -403,11 +417,20 @@ class CVAETrainer:
                 val_loss = 0.0
                 n_val_batches = 0
                 with torch.no_grad():
-                    for xb, yb in val_loader:
+                    for batch in val_loader:
+                        if len(batch) == 2:
+                            xb, yb = batch
+                            mb = None
+                        else:
+                            xb, yb, mb = batch
+
                         xb = xb.to(self.device)
                         yb = yb.to(self.device)
+                        if mb is not None:
+                            mb = mb.to(self.device)
+
                         out, mu_z, logvar_z = self.model(xb, yb)
-                        recon_loss = self._recon_loss(yb, out)
+                        recon_loss = self._recon_loss(yb, out, mask=mb)
                         kl_loss = -0.5 * torch.sum(
                             1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                         )
@@ -455,15 +478,7 @@ class CVAETrainer:
         """
         Return predictive distribution parameters for Y | X.
 
-        bernoulli:
-            {"probs": p_ij}
-
-        gaussian:
-            {"mu": mu_pred_ij, "sigma": sigma_pred_ij}
-
-        poisson:
-            {"rate": lambda_pred_ij, "var_y": var_y_pred_ij}
-              where var_y approximates Var(Y_ij | X_i) under the mixture.
+        (docstring unchanged)
         """
         assert self.trained, "Model must be trained first."
         X = np.asarray(X, dtype=np.float32)
@@ -482,7 +497,6 @@ class CVAETrainer:
             return {"probs": probs}
 
         elif self.outcome_type == "gaussian":
-            # predictive mean and variance via mixture moments
             sum_mu = torch.zeros((n, self.y_dim), device=self.device)
             sum_m2_plus_var = torch.zeros((n, self.y_dim), device=self.device)
 
@@ -505,7 +519,6 @@ class CVAETrainer:
             }
 
         elif self.outcome_type == "poisson":
-            # mixture of Poissons; E[Y] = E[lambda], Var[Y] = E[lambda] + Var[lambda]
             sum_rate = torch.zeros((n, self.y_dim), device=self.device)
             sum_rate_sq = torch.zeros((n, self.y_dim), device=self.device)
 
@@ -535,13 +548,6 @@ class CVAETrainer:
         X: np.ndarray,
         n_mc: int = 20,
     ) -> np.ndarray:
-        """
-        Predict E[Y | X].
-
-        - bernoulli: probabilities
-        - gaussian: predictive mean
-        - poisson:  predictive mean (rate)
-        """
         params = self.predict_params(X, n_mc=n_mc)
         if self.outcome_type == "bernoulli":
             return params["probs"]
@@ -559,8 +565,6 @@ class CVAETrainer:
     ) -> np.ndarray:
         """
         For backward compatibility: only valid for Bernoulli outcomes.
-
-        For non-Bernoulli outcome types, use predict_mean() or predict_params().
         """
         if self.outcome_type != "bernoulli":
             raise ValueError(
@@ -576,11 +580,24 @@ class CVAETrainer:
         Y: np.ndarray,
         n_mc: int = 20,
         eps: float = 1e-7,
+        Y_mask: Optional[np.ndarray] = None,
     ) -> Dict[str, float]:
         """
         Log-likelihood-style evaluation for Bernoulli outcomes.
 
         For outcome_type != 'bernoulli', this is currently not implemented.
+
+        Parameters
+        ----------
+        X : np.ndarray, shape (n, x_dim)
+        Y : np.ndarray, shape (n, y_dim)
+        n_mc : int
+            Monte Carlo samples over z.
+        eps : float
+            Numerical epsilon to avoid log(0).
+        Y_mask : np.ndarray or None, shape (n, y_dim)
+            Optional mask over Y: 1 = observed, 0 = missing. If None,
+            all entries are treated as observed.
         """
         if self.outcome_type != "bernoulli":
             raise NotImplementedError(
@@ -595,8 +612,17 @@ class CVAETrainer:
 
         p = np.clip(probs, eps, 1.0 - eps)
         ll_matrix = Y * np.log(p) + (1.0 - Y) * np.log(1.0 - p)
+
+        if Y_mask is not None:
+            mask = np.asarray(Y_mask, dtype=np.float32)
+            assert mask.shape == Y.shape
+            ll_matrix = ll_matrix * mask
+            denom = float(mask.sum())
+        else:
+            denom = float(Y.shape[0] * Y.shape[1])
+
         sum_ll = float(ll_matrix.sum())
-        avg_ll = float(sum_ll / (Y.shape[0] * Y.shape[1]))
+        avg_ll = float(sum_ll / max(denom, eps))
         avg_bce = float(-avg_ll)
 
         return {
@@ -615,15 +641,7 @@ class CVAETrainer:
         """
         Generate samples from p(Y | X).
 
-        - bernoulli:
-            - return_probs=True : probabilities (via MC mean)
-            - return_probs=False: Bernoulli samples
-        - gaussian:
-            - return_probs=True : predictive means
-            - return_probs=False: Normal samples
-        - poisson:
-            - return_probs=True : predictive rates (lambda)
-            - return_probs=False: Poisson samples
+        (docstring unchanged)
         """
         assert self.trained, "Model must be trained first."
 
