@@ -7,6 +7,91 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+# ---------------------------------------------------------------------------
+# Log-likelihood helper functions (used in tests and potentially by users)
+# ---------------------------------------------------------------------------
+
+def _bernoulli_loglik(y: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+    """
+    Sum log-likelihood for Bernoulli outcomes with given logits.
+
+    Parameters
+    ----------
+    y : torch.Tensor
+        Observed 0/1 outcomes, same shape as logits.
+    logits : torch.Tensor
+        Logits (real-valued) for Bernoulli probabilities.
+
+    Returns
+    -------
+    torch.Tensor (scalar)
+        Sum over all entries of log p(y | logits).
+    """
+    # BCE with logits is -loglik; use elementwise and negate
+    bce = F.binary_cross_entropy_with_logits(logits, y, reduction="none")
+    loglik = -bce
+    return loglik.sum()
+
+
+def _gaussian_loglik(
+    y: torch.Tensor,
+    mu: torch.Tensor,
+    sigma: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Sum log-likelihood for Gaussian outcomes Y ~ N(mu, sigma^2).
+
+    Parameters
+    ----------
+    y : torch.Tensor
+        Observed values.
+    mu : torch.Tensor
+        Mean parameter, same shape as y.
+    sigma : torch.Tensor
+        Standard deviation parameter (> 0), same shape as y.
+    eps : float
+        Small constant to avoid log(0).
+
+    Returns
+    -------
+    torch.Tensor (scalar)
+        Sum over all entries of log p(y | mu, sigma).
+    """
+    sigma = torch.clamp(sigma, min=eps)
+    var = sigma ** 2
+    log_sigma = torch.log(sigma)
+    # log N(y; mu, sigma^2) = -0.5 * [ (y-mu)^2/var + 2 log sigma + log(2π) ]
+    ll_mat = -0.5 * (((y - mu) ** 2) / var + 2.0 * log_sigma + np.log(2.0 * np.pi))
+    return ll_mat.sum()
+
+
+def _poisson_loglik(
+    y: torch.Tensor,
+    rate: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Sum log-likelihood for Poisson outcomes Y ~ Poisson(rate).
+
+    Parameters
+    ----------
+    y : torch.Tensor
+        Observed counts (>= 0).
+    rate : torch.Tensor
+        Poisson rate (lambda), same shape as y.
+    eps : float
+        Small constant to avoid log(0).
+
+    Returns
+    -------
+    torch.Tensor (scalar)
+        Sum over all entries of log p(y | rate).
+    """
+    rate = torch.clamp(rate, min=eps)
+    ll_mat = y * torch.log(rate) - rate - torch.lgamma(y + 1.0)
+    return ll_mat.sum()
+
 
 VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson")
 
