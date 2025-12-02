@@ -336,6 +336,16 @@ class CVAETrainer:
         self.x_std = std.astype(np.float32)
 
     def _standardize(self, X: np.ndarray) -> np.ndarray:
+        """
+        Standardize X using stored mean/std. If the standardizer has not
+        been fit yet (x_mean/x_std is None), fit it on the provided X.
+
+        This makes it safe to call _standardize() before .fit(), which
+        is convenient in tests and quick exploratory use.
+        """
+        X = np.asarray(X, dtype=np.float32)
+        if self.x_mean is None or self.x_std is None:
+            self._fit_standardizer(X)
         return (X - self.x_mean) / self.x_std
 
     # --------- reconstruction loss by outcome family ---------
@@ -416,7 +426,9 @@ class CVAETrainer:
         seed: Optional[int] = None,
         Y_mask_train: Optional[np.ndarray] = None,
         Y_mask_val: Optional[np.ndarray] = None,
+        epochs: Optional[int] = None,
     ) -> Dict[str, Any]:
+
         """
         Fit the CVAE.
 
@@ -429,6 +441,10 @@ class CVAETrainer:
         Y_mask_val : np.ndarray or None, shape (n_val, y_dim)
             Optional mask over Y_val, used for validation loss.
         """
+        # Allow both num_epochs and epochs; epochs is a simple alias used in tests.
+        if epochs is not None:
+            num_epochs = epochs
+
         num_epochs = num_epochs if num_epochs is not None else self.num_epochs
         batch_size = batch_size if batch_size is not None else self.batch_size
         lr = lr if lr is not None else self.lr
@@ -554,6 +570,40 @@ class CVAETrainer:
                 outs.append(out)
         return outs
 
+    def _forward_logits(self, X_std: np.ndarray) -> torch.Tensor:
+        """
+        Internal helper used in tests: given standardized X, produce a single
+        draw of decoder logits for Bernoulli outcomes.
+
+        Parameters
+        ----------
+        X_std : np.ndarray, shape (n, x_dim)
+            Standardized covariate matrix.
+
+        Returns
+        -------
+        torch.Tensor, shape (n, y_dim)
+            Decoder logits for Y | X, Z with a fixed Z sample.
+        """
+        assert self.outcome_type == "bernoulli", (
+            "_forward_logits is only meaningful for outcome_type='bernoulli'."
+        )
+
+        X_std = np.asarray(X_std, dtype=np.float32)
+        n, x_dim = X_std.shape
+        assert x_dim == self.x_dim
+
+        x_tensor = torch.from_numpy(X_std).to(self.device)
+
+        # Use a fixed z (zeros) for determinism and simplicity
+        z = torch.zeros((n, self.latent_dim), device=self.device)
+
+        self.model.eval()
+        with torch.no_grad():
+            out = self.model.decode(x_tensor, z)
+            logits = out["logits"]
+        return logits
+    
     # --------- prediction: distribution parameters ---------
     def predict_params(
         self,
