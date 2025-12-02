@@ -229,14 +229,7 @@ Three R scripts (using **reticulate**) live under `R/`:
   - passing `Y_mask_train` and `Y_mask_val` into `CVAETrainer$fit()`
   - evaluating predictive accuracy only on observed Y entries
 
-  see the script:
-
-  ```
-  examples/fit_cvae_missing_y_gaussian.R
-  ```
-
-This example mirrors the Python version (`gaussian_missing_y.py`) and shows how to call the masked-Y CVAE from R using **reticulate** (Databricks, Posit Workbench, or local).
-
+  This example mirrors the Python version (`gaussian_missing_y.py`) and shows how to call the masked-Y CVAE from R using **reticulate** (Databricks, Posit Workbench, or local).
 
 These provide a template for an **R-facing front end** that uses:
 
