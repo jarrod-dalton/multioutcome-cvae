@@ -1,87 +1,72 @@
 # R/fit_cvae_example.R
+#
+# Minimal R/reticulate example for multibin_cvae:
+#
+#   1. Import the Python package
+#   2. Simulate Bernoulli data (X, Y)
+#   3. Fit a CVAETrainer
+#   4. Get probabilities and simulated outcomes
+#
+# You can source() this in RStudio / Posit Workbench, or copy the
+# code into a notebook chunk.
 
 library(reticulate)
 
-# OPTIONAL: explicitly point to the Python env you want
-# use_python("/path/to/your/python", required = TRUE)
+# If needed, pin an environment:
+# use_python("/databricks/python3/bin/python", required = TRUE)
+# or use_condaenv("myenv", required = TRUE)
 
-# Make sure Python can find your multibin_cvae package.
-# On Databricks, you might instead have done sys.path.append() in Python;
-# here we assume the package is discoverable on sys.path.
+# Make sure Python can see /path/to/your/repo/python
+# For Databricks or Posit, you might set this via RETICULATE_PYTHON
+# and PYTHONPATH instead.
+sys <- import("sys")
+sys$path$append("/path/to/your/repo/python")
+
 mb <- import("multibin_cvae")
 
-# 1. Simulate data from the Python helper
+# 1. Simulate Bernoulli data
 sim <- mb$simulate_cvae_data(
-  n_samples  = as.integer(20000),
-  n_features = as.integer(5),
-  n_outcomes = as.integer(10),
-  latent_dim = as.integer(2),
-  seed       = as.integer(1234)
+  n_samples  = 5000L,
+  n_features = 5L,
+  n_outcomes = 10L,
+  latent_dim = 2L,
+  outcome_type = "bernoulli",
+  seed       = 1234L
 )
 
 X <- sim[[1]]
 Y <- sim[[2]]
 
-dim(X)  # 20000 x 5
-dim(Y)  # 20000 x 10
+cat("Simulated data:\n")
+cat("  dim(X) =", paste(dim(X), collapse = " x "), "\n")
+cat("  dim(Y) =", paste(dim(Y), collapse = " x "), "\n\n")
 
-# 2. Define a small search space for tuning
-# reticulate::dict() creates a Python dict
-search_space <- dict(
-  latent_dim      = list(as.integer(4), as.integer(8)),
-  enc_hidden_dims = list(
-    list(as.integer(64), as.integer(64)),
-    list(as.integer(128), as.integer(64))
-  ),
-  dec_hidden_dims = list(
-    list(as.integer(64), as.integer(64)),
-    list(as.integer(128), as.integer(64))
-  ),
-  lr              = list(1e-3, 5e-4),
-  beta_kl         = list(0.5, 1.0),
-  batch_size      = list(as.integer(128), as.integer(256)),
-  num_epochs      = list(as.integer(20), as.integer(40))
+# 2. Construct trainer
+trainer <- mb$CVAETrainer(
+  x_dim        = as.integer(ncol(X)),
+  y_dim        = as.integer(ncol(Y)),
+  latent_dim   = 8L,
+  outcome_type = "bernoulli",
+  hidden_dim   = 64L,
+  n_hidden_layers = 2L
 )
 
-# 3. Run tuning + final fit (no MLflow, entirely in memory)
-fit_res <- mb$fit_cvae_with_tuning(
-  X           = X,
-  Y           = Y,
-  search_space = search_space,
-  method      = "random",   # or "tpe" if hyperopt is installed
-  n_trials    = as.integer(5),
-  train_frac  = 0.8,
-  seed        = as.integer(1234),
-  verbose     = TRUE
-)
+# 3. Fit
+history <- trainer$fit(X, Y, verbose = TRUE)
 
-# Fit results is a Python dict-like object:
-fit_res
-best_config <- fit_res[["best_config"]]
-best_config
+# 4. Predict conditional probabilities P(Y_ij = 1 | X_i)
+X_sub <- X[1:10, , drop = FALSE]
+p_hat <- trainer$predict_proba(X_sub, n_mc = 30L)
 
-# 4. Extract the trained CVAETrainer
-trainer <- fit_res[["trainer"]]
+cat("First row of predicted probabilities:\n")
+print(p_hat[1, ])
 
-# 5. Generate new outcomes for a subset of X
-X_new <- X[1:5, , drop = FALSE]
-
+# 5. Generate new Bernoulli outcomes for these X values
 Y_sim <- trainer$generate(
-  X_new,
-  n_samples_per_x = as.integer(10),
+  X_sub,
+  n_samples_per_x = 5L,
   return_probs    = FALSE
 )
 
-# Y_sim has shape (5, 10, 10) in Python terms (R will show as array)
-Y_sim
-
-# 6. Evaluate log-likelihood-based goodness-of-fit on a held-out subset
-idx_test <- 1:2000
-ll_metrics <- trainer$evaluate_loglik(
-  X = X[idx_test, , drop = FALSE],
-  Y = Y[idx_test, , drop = FALSE],
-  n_mc = as.integer(20),
-  eps  = 1e-7
-)
-
-ll_metrics
+cat("\nGenerated Y_sim shape (flattened):\n")
+print(dim(Y_sim))
