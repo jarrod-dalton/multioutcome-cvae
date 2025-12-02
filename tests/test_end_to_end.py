@@ -25,7 +25,7 @@ def test_end_to_end_small_model():
 
     # Loss should decrease somewhat (not strict)
     assert len(hist["train_loss"]) == 5
-    assert hist["train_loss"][0] > hist["train loss"][-1]
+    assert hist["train_loss"][0] > hist["train_loss"][-1]
 
     # Generate samples
     Y_sim = tr.generate(X[:5],n_samples_per_x=5)
