@@ -204,7 +204,7 @@ For all three families, the cross-dimension dependence in Y is induced through t
 
 ## 6. R integration
 
-Two R scripts (using **reticulate**) live under `R/`:
+Three R scripts (using **reticulate**) live under `R/`:
 
 - `R/fit_cvae_example.R`  
   - Imports `multibin_cvae` from Python
@@ -221,6 +221,22 @@ Two R scripts (using **reticulate**) live under `R/`:
   - Simulates new covariates X in R and obtains:
     - predictive probabilities
     - simulated outcomes
+   
+- `R/fit_cvae_missing_y_gaussian.R`
+  - MCAR missingness in Y
+  - construction of a Y-mask matrix
+  - simple imputation for encoder inputs
+  - passing `Y_mask_train` and `Y_mask_val` into `CVAETrainer$fit()`
+  - evaluating predictive accuracy only on observed Y entries
+
+  see the script:
+
+  ```
+  examples/fit_cvae_missing_y_gaussian.R
+  ```
+
+This example mirrors the Python version (`gaussian_missing_y.py`) and shows how to call the masked-Y CVAE from R using **reticulate** (Databricks, Posit Workbench, or local).
+
 
 These provide a template for an **R-facing front end** that uses:
 
