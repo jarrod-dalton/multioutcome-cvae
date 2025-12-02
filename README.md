@@ -229,7 +229,92 @@ These provide a template for an **R-facing front end** that uses:
 
 ---
 
-## 7. Databricks + MLflow
+## 7. Handling missing outcome values (Y)
+
+The CVAE can be trained when **Y has missing elements**, under standard MCAR/MAR assumptions, by providing a **mask** for the observed entries.
+
+### Mask semantics
+
+- `Y_mask[i, j] = 1` → `Y[i, j]` is observed  
+- `Y_mask[i, j] = 0` → `Y[i, j]` is missing  
+
+During training:
+
+- The reconstruction loss is computed **only over observed entries**.
+- Missing entries do **not** contribute to the likelihood term.
+- X is still assumed to be **fully observed**; handling missing X is currently out of scope.
+
+### Training with missing Y (example, Gaussian)
+
+```python
+import numpy as np
+from multibin_cvae import simulate_cvae_data, CVAETrainer
+
+# 1. Simulate complete Gaussian data
+X, Y_full, params = simulate_cvae_data(
+    n_samples=5000,
+    n_features=5,
+    n_outcomes=6,
+    latent_dim=2,
+    outcome_type="gaussian",
+    seed=1234,
+)
+
+# 2. Create a missingness mask for Y (30% missing completely at random)
+rng = np.random.default_rng(2025)
+missing_prob = 0.3
+Y_mask = (rng.random(Y_full.shape) > missing_prob).astype(np.float32)  # 1=obs, 0=miss
+
+# 3. Create an imputed version of Y for the encoder input
+Y_obs = Y_full.copy()
+Y_obs[Y_mask == 0] = np.nan
+col_means = np.nanmean(Y_obs, axis=0)
+Y_imputed = np.where(np.isnan(Y_obs), col_means, Y_obs)
+
+# 4. Train/validation split
+n = X.shape[0]
+idx = rng.permutation(n)
+n_train = int(0.8 * n)
+idx_train, idx_val = idx[:n_train], idx[n_train:]
+
+X_train, X_val = X[idx_train], X[idx_val]
+Y_train, Y_val = Y_imputed[idx_train], Y_imputed[idx_val]
+Y_mask_train, Y_mask_val = Y_mask[idx_train], Y_mask[idx_val]
+
+# 5. Fit CVAE with masked Y
+trainer = CVAETrainer(
+    x_dim=X.shape[1],
+    y_dim=Y_full.shape[1],
+    latent_dim=8,
+    outcome_type="gaussian",
+    hidden_dim=64,
+    n_hidden_layers=2,
+)
+
+history = trainer.fit(
+    X_train=X_train,
+    Y_train=Y_train,
+    X_val=X_val,
+    Y_val=Y_val,
+    Y_mask_train=Y_mask_train,
+    Y_mask_val=Y_mask_val,
+    num_epochs=30,
+    verbose=True,
+)
+
+# 6. Use the trained model as usual
+mu_pred = trainer.predict_mean(X_val, n_mc=30)
+```
+
+In this workflow:
+
+- The CVAE uses `Y_imputed` only as an **input to the encoder**.
+- The loss function uses the **mask** (`Y_mask_*`) to restrict reconstruction to observed entries.
+- X must still be imputed / completed before model fitting (see discussion in the docs for missing X).
+
+---
+
+## 8. Databricks + MLflow
 
 On Databricks, the typical workflow is:
 
@@ -244,7 +329,7 @@ On Databricks, the typical workflow is:
 
 ---
 
-## 8. Tests
+## 9. Tests
 
 This repository includes a small `/tests` directory with PyTest-based unit tests covering:
 
