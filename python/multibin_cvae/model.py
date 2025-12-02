@@ -455,7 +455,6 @@ class CVAETrainer:
             np.random.seed(seed)
             random.seed(seed)
 
-        self._fit_standardizer(X_train)
         X_train_std = self._standardize(X_train)
 
         if X_val is not None:
