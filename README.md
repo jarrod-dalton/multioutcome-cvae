@@ -338,7 +338,181 @@ On Databricks, the typical workflow is:
 
 ---
 
-## 9. Tests
+## 9. Model Diagnostics
+
+## Diagnostics, calibration, and posterior predictive checks
+
+The package includes a small diagnostics toolbox to help you assess how well
+a fitted CVAE captures the conditional distribution of `Y | X`.
+
+### 9.1. Calibration (Bernoulli / Gaussian / Poisson)
+
+Functions:
+
+- `calibration_curve_with_ci(y_true, y_pred, outcome_type="bernoulli", ...)`
+- `plot_global_calibration(y_true, y_pred, outcome_type="bernoulli", ...)`
+- `plot_per_outcome_calibration_grid(Y_true, Y_pred, outcome_type="bernoulli", ...)`
+- `expected_calibration_error(y_true, y_pred, outcome_type=...)`
+- `maximum_calibration_error(y_true, y_pred, outcome_type=...)`
+
+Example (Bernoulli):
+
+```python
+from multioutcome_cvae import (
+    CVAETrainer,
+    simulate_cvae_data,
+    plot_global_calibration,
+    plot_per_outcome_calibration_grid,
+    expected_calibration_error,
+)
+
+# Simulate data and fit a Bernoulli CVAE
+X, Y, _ = simulate_cvae_data(
+    n_samples=5000,
+    n_features=5,
+    n_outcomes=8,
+    latent_dim=2,
+    outcome_type="bernoulli",
+    seed=123,
+)
+
+trainer = CVAETrainer(
+    x_dim=X.shape[1],
+    y_dim=Y.shape[1],
+    latent_dim=4,
+    outcome_type="bernoulli",
+)
+
+trainer.fit(X, Y, num_epochs=20, verbose=False, seed=123)
+
+# Predicted probabilities on the same X (or a test set)
+p_hat = trainer.predict_mean(X, n_mc=30)
+
+# Global calibration plot (all outcomes flattened)
+plot_global_calibration(
+    y_true=Y.ravel(),
+    y_pred=p_hat.ravel(),
+    outcome_type="bernoulli",
+)
+
+# Per-outcome calibration grid
+plot_per_outcome_calibration_grid(
+    Y_true=Y,
+    Y_pred=p_hat,
+    outcome_type="bernoulli",
+)
+
+# Scalar calibration summaries
+ece = expected_calibration_error(Y.ravel(), p_hat.ravel(), outcome_type="bernoulli")
+print("ECE (Bernoulli):", ece)
+```
+
+For Gaussian / Poisson outcomes, pass the appropriate `outcome_type` and use
+predicted means from `trainer.predict_mean(...)` in place of probabilities.
+
+---
+
+### 9.2. SHAP-style dependence curves
+
+For a fitted model, you can visualize how a single feature in `X` influences
+the mean of a particular outcome dimension via a simple “partial-dependence”
+style curve:
+
+Functions:
+
+- `dependence_curve(trainer, X, feature_index, outcome_index=0, ...)`
+- `plot_dependence_curve(trainer, X, feature_index, outcome_index=0, ...)`
+
+Example:
+
+```python
+from multioutcome_cvae import plot_dependence_curve
+
+# trainer: a fitted CVAETrainer
+# X: the covariate matrix used for training or a representative sample
+
+ax = plot_dependence_curve(
+    trainer=trainer,
+    X=X,
+    feature_index=0,     # which X column to vary
+    outcome_index=0,     # which Y dimension to track
+    n_grid=50,
+    n_mc=30,
+    feature_name="X0",
+    outcome_name="Y0",
+)
+```
+
+This produces a 1D curve showing `E[Y[outcome_index] | X_feature]` as the
+feature is swept over a grid of values (within a chosen quantile range).
+
+---
+
+### 9.3. Posterior predictive checks (Gaussian / Poisson)
+
+These helpers compare summaries of the observed data with replicated data
+drawn from the fitted CVAE’s posterior predictive distribution.
+
+Functions:
+
+- `posterior_predictive_check_gaussian(trainer, X, Y, n_rep=100, ...)`
+- `posterior_predictive_check_poisson(trainer, X, Y, n_rep=100, ...)`
+
+Example (Gaussian):
+
+```python
+from multioutcome_cvae import posterior_predictive_check_gaussian
+
+# Suppose trainer_gauss is a CVAETrainer with outcome_type="gaussian"
+# and X_gauss, Y_gauss are the data used for evaluation
+
+ppc_results = posterior_predictive_check_gaussian(
+    trainer=trainer_gauss,
+    X=X_gauss,
+    Y=Y_gauss,
+    n_rep=200,
+    n_mc_params=20,
+    plot=True,   # show histograms of replicated vs observed summaries
+)
+```
+
+Example (Poisson):
+
+```python
+from multioutcome_cvae import posterior_predictive_check_poisson
+
+ppc_results = posterior_predictive_check_poisson(
+    trainer=trainer_poiss,
+    X=X_poiss,
+    Y=Y_poiss,
+    n_rep=200,
+    n_mc_params=20,
+    plot=True,
+)
+```
+
+These functions return dictionaries with observed and replicated summary
+statistics (means and variances across outcome dimensions), which you can
+use for additional custom diagnostics.
+
+---
+
+### 9.4. Vignette
+
+See the **model recovery & diagnostics vignette** (e.g.
+`docs/model_recovery_vignette.ipynb` or equivalent) for a complete, runnable
+example that:
+
+- Simulates Bernoulli / Gaussian / Poisson outcomes,
+- Fits a CVAE for each family,
+- Computes calibration curves and ECE/MCE,
+- Produces per-outcome calibration grids,
+- Runs posterior predictive checks,
+- And illustrates dependence curves for selected features.
+
+---
+
+## 10. Unit Tests
 
 This repository includes a small `/tests` directory with PyTest-based unit tests covering:
 
