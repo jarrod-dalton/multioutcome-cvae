@@ -1,6 +1,6 @@
 # tests/test_trainer_basic.py
 import numpy as np
-from multibin_cvae import CVAETrainer
+from multioutcome_cvae import CVAETrainer
 
 def test_trainer_initialization():
     tr = CVAETrainer(

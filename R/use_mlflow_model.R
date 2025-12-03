@@ -3,7 +3,7 @@
 # Example: use a CVAE model stored in MLflow from R via reticulate.
 #
 # Prerequisites:
-#   1. You ran python/multibin_cvae/examples/train_with_mlflow.py
+#   1. You ran python/multioutcome_cvae/examples/train_with_mlflow.py
 #      and have an MLflow run ID.
 #   2. That training script logged:
 #        - the PyTorch model at artifact_path="model"
@@ -31,7 +31,7 @@ library(reticulate)
 
 sys <- import("sys")
 
-# Make sure Python can find the multibin_cvae package.
+# Make sure Python can find the multioutcome_cvae package.
 # EDIT THIS PATH for your environment:
 sys$path$append("/path/to/your/repo/python")
 
@@ -40,7 +40,7 @@ np       <- import("numpy")
 torch    <- import("torch")
 
 # Import the helper class that wraps the raw model
-use_mod  <- import("multibin_cvae.examples.use_mlflow_model")
+use_mod  <- import("multioutcome_cvae.examples.use_mlflow_model")
 LoadedCVAEModule <- use_mod$LoadedCVAEModule
 
 # ------------------------------------------------------------------

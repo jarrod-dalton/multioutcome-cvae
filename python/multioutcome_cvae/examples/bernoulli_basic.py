@@ -11,13 +11,13 @@ Hello-world example for multivariate Bernoulli outcomes:
 
 Run:
 
-    python -m multibin_cvae.examples.bernoulli_basic
+    python -m multioutcome_cvae.examples.bernoulli_basic
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from multibin_cvae import (
+from multioutcome_cvae import (
     simulate_cvae_data,
     CVAETrainer,
     compare_real_vs_generated,

@@ -245,7 +245,7 @@ class MultivariateOutcomeCVAE(nn.Module):
 
 # Example usage:
 #
-# from multibin_cvae import CVAETrainer
+# from multioutcome_cvae import CVAETrainer
 #
 # trainer = CVAETrainer(
 #     x_dim=5,

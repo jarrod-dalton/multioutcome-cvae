@@ -1,5 +1,5 @@
 # tests/test_end_to_end.py
-from multibin_cvae import simulate_cvae_data, CVAETrainer
+from multioutcome_cvae import simulate_cvae_data, CVAETrainer
 import numpy as np
 
 def test_end_to_end_small_model():

@@ -15,6 +15,6 @@ def test_import_gaussian_missing_y_example():
     without raising errors.
     """
     mod = importlib.import_module(
-        "multibin_cvae.examples.gaussian_missing_y"
+        "multioutcome_cvae.examples.gaussian_missing_y"
     )
     assert mod is not None

@@ -12,7 +12,7 @@ End-to-end example:
 
 Intended usage:
 
-    python -m multibin_cvae.examples.train_with_mlflow
+    python -m multioutcome_cvae.examples.train_with_mlflow
 
 In Databricks, you can also copy/paste the contents of main() into a
 Python notebook cell, or `import` this file and call run_experiment().
@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import mlflow
 import mlflow.pytorch
 
-from multibin_cvae import (
+from multioutcome_cvae import (
     simulate_cvae_data,
     fit_cvae_with_tuning,
     compare_real_vs_generated,
@@ -44,7 +44,7 @@ def run_experiment(
     train_frac: float = 0.8,
     seed: int = 1234,
     tuning_method: str = "random",  # "random" or "tpe" (if hyperopt installed)
-    experiment_name: str = "multibin_cvae_mlflow",
+    experiment_name: str = "multioutcome_cvae_mlflow",
     run_name: str = "cvae_tuned_bernoulli",
 ) -> Dict[str, Any]:
     """
@@ -82,7 +82,7 @@ def run_experiment(
     tuning_method : {"random", "tpe"}, default="random"
         Hyperparameter search strategy. "tpe" requires hyperopt.
 
-    experiment_name : str, default="multibin_cvae_mlflow"
+    experiment_name : str, default="multioutcome_cvae_mlflow"
         Name of the MLflow experiment.
 
     run_name : str, default="cvae_tuned_bernoulli"
@@ -235,9 +235,9 @@ def main():
     Simple entry point for running the example as a script.
 
     You can customize the defaults here or swap in environment variables,
-    e.g. via os.getenv("MLFLOW_EXPERIMENT_NAME", "multibin_cvae_mlflow").
+    e.g. via os.getenv("MLFLOW_EXPERIMENT_NAME", "multioutcome_cvae_mlflow").
     """
-    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "multibin_cvae_mlflow")
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "multioutcome_cvae_mlflow")
     run_name = os.getenv("MLFLOW_RUN_NAME", "cvae_tuned_bernoulli")
 
     result = run_experiment(

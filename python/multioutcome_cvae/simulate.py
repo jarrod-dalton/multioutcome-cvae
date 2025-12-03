@@ -1,7 +1,7 @@
 """
 simulate.py
 
-Core simulation utilities and simple diagnostics for the multibin_cvae package.
+Core simulation utilities and simple diagnostics for the multioutcome_cvae package.
 
 This module provides:
   - Synthetic data generators for different outcome families

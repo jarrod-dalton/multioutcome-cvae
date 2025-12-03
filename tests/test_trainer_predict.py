@@ -1,6 +1,6 @@
 # tests/test_trainer_predict.py
 import numpy as np
-from multibin_cvae import simulate_cvae_data, CVAETrainer
+from multioutcome_cvae import simulate_cvae_data, CVAETrainer
 
 def test_predict_proba_in_range():
     X, Y, _ = simulate_cvae_data(

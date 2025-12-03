@@ -1,7 +1,7 @@
 # tests/test_bayeslik.py
 import numpy as np
 import torch
-from multibin_cvae.model import _bernoulli_loglik, _gaussian_loglik, _poisson_loglik
+from multioutcome_cvae.model import _bernoulli_loglik, _gaussian_loglik, _poisson_loglik
 
 def test_bernoulli_loglik_matches_pytorch():
     y = torch.tensor([[0.,1.,1.],[1.,0.,1.]])

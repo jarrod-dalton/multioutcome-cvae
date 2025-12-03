@@ -7,7 +7,7 @@
 #' @param latent_dim,hidden_dim,num_epochs,batch_size,lr,beta_kl Hyperparameters.
 #' @return A reticulate Python object (CVAETrainer).
 #' @export
-fit_multibin_cvae <- function(
+fit_multioutcome_cvae <- function(
   X,
   Y,
   latent_dim = 8L,
@@ -22,7 +22,7 @@ fit_multibin_cvae <- function(
   }
   X <- as.matrix(X)
   Y <- as.matrix(Y)
-  mb <- reticulate::import("multibin_cvae")
+  mb <- reticulate::import("multioutcome_cvae")
 
   trainer <- mb$CVAETrainer(
     x_dim = ncol(X),

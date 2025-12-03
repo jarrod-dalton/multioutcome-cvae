@@ -2,7 +2,7 @@
 import numpy as np
 import torch
 
-from multibin_cvae import CVAETrainer
+from multioutcome_cvae import CVAETrainer
 
 
 def test_recon_loss_gaussian_mask_vs_manual():

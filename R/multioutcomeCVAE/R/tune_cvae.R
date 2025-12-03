@@ -5,7 +5,7 @@
 #' @param n_trials Number of random search trials.
 #' @return A list containing trial results and best config.
 #' @export
-tune_multibin_cvae <- function(
+tune_multioutcome_cvae <- function(
   X_train,
   Y_train,
   X_val,
@@ -21,7 +21,7 @@ tune_multibin_cvae <- function(
   X_val   <- as.matrix(X_val)
   Y_val   <- as.matrix(Y_val)
 
-  mb <- reticulate::import("multibin_cvae")
+  mb <- reticulate::import("multioutcome_cvae")
 
   # Convert R list to Python dict
   py_search_space <- reticulate::r_to_py(search_space)

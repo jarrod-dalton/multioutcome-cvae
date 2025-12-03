@@ -12,12 +12,12 @@ Steps:
 
 Run:
 
-    python -m multibin_cvae.examples.gaussian_missing_y
+    python -m multioutcome_cvae.examples.gaussian_missing_y
 """
 
 import numpy as np
 
-from multibin_cvae import (
+from multioutcome_cvae import (
     simulate_cvae_data,
     CVAETrainer,
 )

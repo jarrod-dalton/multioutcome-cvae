@@ -15,7 +15,7 @@ Assumptions:
 Usage:
 
   export MLFLOW_RUN_ID=<your_run_id>
-  python -m multibin_cvae.examples.use_mlflow_model
+  python -m multioutcome_cvae.examples.use_mlflow_model
 """
 
 import os

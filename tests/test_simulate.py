@@ -1,6 +1,6 @@
 # tests/test_simulate.py
 import numpy as np
-from multibin_cvae import simulate_cvae_data
+from multioutcome_cvae import simulate_cvae_data
 
 def test_simulate_bernoulli_shapes():
     X, Y, params = simulate_cvae_data(

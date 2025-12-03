@@ -4,7 +4,7 @@
 # using reticulate.
 #
 # Assumes:
-#   - Python environment has multibin_cvae installed / importable
+#   - Python environment has multioutcome_cvae installed / importable
 #   - You have set up RETICULATE_PYTHON or use_python()/use_condaenv()
 #
 # Usage:
@@ -13,7 +13,7 @@
 library(reticulate)
 
 # ------------------------------------------------------------------------------
-# 1. Configure Python + import multibin_cvae
+# 1. Configure Python + import multioutcome_cvae
 # ------------------------------------------------------------------------------
 
 # If needed, pin Python (Databricks / Posit / local):
@@ -26,7 +26,7 @@ sys <- import("sys")
 # If you've installed from GitHub via pip, you may not need this.
 # sys$path$append("/path/to/your/repo/python")
 
-mb <- import("multibin_cvae")
+mb <- import("multioutcome_cvae")
 
 # ------------------------------------------------------------------------------
 # 2. Simulate complete Gaussian data

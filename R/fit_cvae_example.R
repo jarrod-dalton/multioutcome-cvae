@@ -1,6 +1,6 @@
 # R/fit_cvae_example.R
 #
-# Minimal R/reticulate example for multibin_cvae:
+# Minimal R/reticulate example for multioutcome_cvae:
 #
 #   1. Import the Python package
 #   2. Simulate Bernoulli data (X, Y)
@@ -22,7 +22,7 @@ library(reticulate)
 sys <- import("sys")
 sys$path$append("/path/to/your/repo/python")
 
-mb <- import("multibin_cvae")
+mb <- import("multioutcome_cvae")
 
 # 1. Simulate Bernoulli data
 sim <- mb$simulate_cvae_data(

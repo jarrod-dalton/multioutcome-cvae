@@ -21,7 +21,7 @@ Most users will interact with:
 
 - `simulate_cvae_data(...)` – convenience simulators
 - `CVAETrainer` – train/evaluate/generate
-- the **example scripts** under `python/multibin_cvae/examples/`
+- the **example scripts** under `python/multioutcome_cvae/examples/`
 - the **R scripts** under `R/`
 
 ---
@@ -44,7 +44,7 @@ Minimal end-to-end example using **simulated multivariate Bernoulli** data:
 import sys
 sys.path.append("/path/to/your/repo/python")
 
-from multibin_cvae import (
+from multioutcome_cvae import (
     simulate_cvae_data,
     CVAETrainer,
 )
@@ -82,7 +82,7 @@ Y_sim = trainer.generate(
 )
 ```
 
-For more detailed examples (plots, tuning, MLflow, etc.), see the scripts under `python/multibin_cvae/examples/` summarized below.
+For more detailed examples (plots, tuning, MLflow, etc.), see the scripts under `python/multioutcome_cvae/examples/` summarized below.
 
 ---
 
@@ -91,7 +91,7 @@ For more detailed examples (plots, tuning, MLflow, etc.), see the scripts under 
 ```text
 .
 ├── python
-│   └── multibin_cvae
+│   └── multioutcome_cvae
 │       ├── __init__.py
 │       ├── model.py        # CVAE model + trainer + tuning utilities
 │       ├── simulate.py     # core simulators + basic diagnostics
@@ -108,10 +108,10 @@ For more detailed examples (plots, tuning, MLflow, etc.), see the scripts under 
 All examples are runnable as:
 
 ```bash
-python -m multibin_cvae.examples.<script_name>
+python -m multioutcome_cvae.examples.<script_name>
 ```
 
-from within `python/`’s parent directory (or any location where `multibin_cvae` is importable).
+from within `python/`’s parent directory (or any location where `multioutcome_cvae` is importable).
 
 ### 4.1 Hello world examples
 
@@ -207,7 +207,7 @@ For all three families, the cross-dimension dependence in Y is induced through t
 Three R scripts (using **reticulate**) live under `R/`:
 
 - `R/fit_cvae_example.R`  
-  - Imports `multibin_cvae` from Python
+  - Imports `multioutcome_cvae` from Python
   - Simulates Bernoulli data in Python
   - Fits a CVAE
   - Calls `predict_proba()` and `generate()` from R
@@ -257,7 +257,7 @@ During training:
 
 ```python
 import numpy as np
-from multibin_cvae import simulate_cvae_data, CVAETrainer
+from multioutcome_cvae import simulate_cvae_data, CVAETrainer
 
 # 1. Simulate complete Gaussian data
 X, Y_full, params = simulate_cvae_data(
@@ -541,7 +541,7 @@ The tests are designed to be stable across platforms and catch API regressions w
 
 For concrete, runnable code, see the scripts in:
 
-- `python/multibin_cvae/examples/`
+- `python/multioutcome_cvae/examples/`
 - `R/`
 
 They are intended as living documentation of how to wire everything together in real workflows.

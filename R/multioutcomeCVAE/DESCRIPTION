@@ -1,9 +1,9 @@
-Package: multibinCvae
+Package: multioutcomeCVAE
 Type: Package
 Title: Multivariate Binary CVAE (Python Backend)
 Version: 0.0.1
-Authors@R: person(given = "Your", family = "Name", role = c("aut", "cre"),
-  email = "you@example.org")
+Authors@R: person(given = "Jarrod", family = "Dalton", role = c("aut", "cre"),
+  email = "daltonj@ccf.org")
 Description: R wrappers around a Python Conditional VAE for multivariate binary outcomes, using reticulate.
 Depends: R (>= 4.0)
 Imports:
