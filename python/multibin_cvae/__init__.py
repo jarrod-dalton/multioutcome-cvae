@@ -1,13 +1,3 @@
-"""
-Public API for the multibin_cvae package.
-
-Most users will interact with:
-
-- simulate_cvae_data(...)
-- CVAETrainer
-- fit_cvae_with_tuning(...)
-"""
-
 from .model import (
     MultivariateOutcomeCVAE,
     CVAETrainer,
@@ -15,13 +5,39 @@ from .model import (
     tune_cvae_tpe,
     fit_cvae_with_tuning,
 )
+
 from .simulate import simulate_cvae_data
 
+# Import all diagnostics utilities
+from .utils_diagnostics import (
+    calibration_curve_with_ci,
+    plot_global_calibration,
+    plot_per_outcome_calibration_grid,
+    expected_calibration_error,
+    maximum_calibration_error,
+    dependence_curve,
+    plot_dependence_curve,
+    posterior_predictive_check_gaussian,
+    posterior_predictive_check_poisson,
+)
+
 __all__ = [
+    # Core model + training tools
     "MultivariateOutcomeCVAE",
     "CVAETrainer",
     "tune_cvae_random_search",
     "tune_cvae_tpe",
     "fit_cvae_with_tuning",
     "simulate_cvae_data",
+
+    # Diagnostics tools
+    "calibration_curve_with_ci",
+    "plot_global_calibration",
+    "plot_per_outcome_calibration_grid",
+    "expected_calibration_error",
+    "maximum_calibration_error",
+    "dependence_curve",
+    "plot_dependence_curve",
+    "posterior_predictive_check_gaussian",
+    "posterior_predictive_check_poisson",
 ]
