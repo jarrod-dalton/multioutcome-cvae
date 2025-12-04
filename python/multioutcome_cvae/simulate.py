@@ -256,12 +256,10 @@ def simulate_poisson_data(
         X_i ~ N(0, I_{n_features})
         Z_i ~ N(0, I_{latent_dim})
 
-        log_rate_ij = (X_i @ B_x)_j + (Z_i @ B_z)_j + b_j
-        lambda_ij   = exp( log_rate_scale * log_rate_ij ) + base_rate
-        Y_ij        ~ Poisson(lambda_ij)
-
-    where base_rate keeps rates away from zero and rate_scale controls overall
-    variability in log-rates.
+        log_rate_raw_ij = (X_i @ B_x)_j + (Z_i @ B_z)_j + b_j
+        log_rate_ij     = rate_scale * log_rate_raw_ij
+        lambda_ij       = exp(log_rate_ij) + base_rate
+        Y_ij            ~ Poisson(lambda_ij)
 
     Parameters
     ----------
@@ -344,6 +342,112 @@ def simulate_poisson_data(
     return X, Y, params
 
 
+def simulate_neg_binomial_data(
+    n_samples: int,
+    n_features: int,
+    n_outcomes: int,
+    latent_dim: int = 2,
+    base_rate: float = 0.5,
+    rate_scale: float = 0.5,
+    dispersion: float = 2.0,
+    seed: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Simulate multivariate Negative Binomial outcomes with latent dependence and covariates.
+
+    Parameterization matches the model:
+
+        Var(Y_ij | X_i) = mu_ij + mu_ij^2 / r_j
+
+    where r_j is a dispersion (larger r_j = less overdispersion).
+
+    Data-generating structure (per observation i):
+
+        X_i ~ N(0, I_{n_features})
+        Z_i ~ N(0, I_{latent_dim})
+
+        eta_ij     = (X_i @ B_x)_j + (Z_i @ B_z)_j + b_j
+        log_mu_ij  = rate_scale * eta_ij
+        mu_ij      = exp(log_mu_ij) + base_rate
+        r_j        = dispersion (can be scalar or vector length n_outcomes)
+
+        Y_ij ~ NB(r_j, p_ij),
+          p_ij = r_j / (r_j + mu_ij)
+
+    Parameters
+    ----------
+    n_samples, n_features, n_outcomes, latent_dim : int
+        Dimensions as in other simulators.
+
+    base_rate : float, default=0.5
+        Baseline added to exp(log_mu) to keep means away from zero.
+
+    rate_scale : float, default=0.5
+        Scale on the linear predictor before exponentiation.
+
+    dispersion : float, default=2.0
+        Dispersion r. Larger values => variance closer to Poisson; smaller =>
+        more overdispersed.
+
+    seed : int or None, default=None
+
+    Returns
+    -------
+    X : ndarray (n_samples, n_features)
+    Y : ndarray (n_samples, n_outcomes)
+    params : dict with true B_x, B_z, b, Z, r, etc.
+    """
+    rng = _get_rng(seed)
+
+    X = rng.normal(size=(n_samples, n_features)).astype(np.float32)
+    Z = rng.normal(size=(n_samples, latent_dim)).astype(np.float32)
+
+    B_x = rng.normal(scale=1.0 / np.sqrt(n_features), size=(n_features, n_outcomes)).astype(
+        np.float32
+    )
+    B_z = rng.normal(scale=1.0 / np.sqrt(latent_dim), size=(latent_dim, n_outcomes)).astype(
+        np.float32
+    )
+    b = rng.normal(scale=0.3, size=(n_outcomes,)).astype(np.float32)
+
+    eta = X @ B_x + Z @ B_z + b  # (n_samples, n_outcomes)
+    log_mu = rate_scale * eta
+    log_mu = np.clip(log_mu, -5.0, 5.0)
+
+    mu = np.exp(log_mu) + base_rate  # mean
+
+    # dispersion r: can be scalar or per-outcome; here use a single scalar for simplicity
+    r = np.full((n_outcomes,), dispersion, dtype=np.float32)
+
+    # Broadcast r to shape (n_samples, n_outcomes)
+    r_mat = np.broadcast_to(r, mu.shape).astype(np.float32)
+
+    # NB sampling: numpy negative_binomial with parameters (n, p)
+    # mean = n (1-p) / p = mu  ->  p = n / (n + mu)
+    p = r_mat / (r_mat + mu)
+    # Clip to avoid numerical issues
+    p = np.clip(p, 1e-6, 1.0 - 1e-6)
+
+    # numpy supports array-shaped parameters (broadcasting)
+    Y = rng.negative_binomial(n=r_mat, p=p).astype(np.float32)
+
+    params = {
+        "B_x": B_x,
+        "B_z": B_z,
+        "b": b,
+        "Z": Z,
+        "latent_dim": latent_dim,
+        "base_rate": base_rate,
+        "rate_scale": rate_scale,
+        "dispersion": dispersion,
+        "r": r,
+        "outcome_type": "neg_binomial",
+        "seed": seed,
+    }
+
+    return X, Y, params
+
+
 def simulate_cvae_data(
     n_samples: int,
     n_features: int,
@@ -371,7 +475,7 @@ def simulate_cvae_data(
     latent_dim : int, default=2
         Latent dimension used to induce dependence across Y.
 
-    outcome_type : {"bernoulli", "gaussian", "poisson"}, default="bernoulli"
+    outcome_type : {"bernoulli", "gaussian", "poisson", "neg_binomial"}, default="bernoulli"
         Outcome family to simulate.
 
     seed : int or None, default=None
@@ -385,6 +489,8 @@ def simulate_cvae_data(
               noise_sd (float)
           - For Poisson:
               base_rate (float), rate_scale (float)
+          - For Negative Binomial:
+              base_rate (float), rate_scale (float), dispersion (float)
 
     Returns
     -------
@@ -425,23 +531,18 @@ def simulate_cvae_data(
             seed=seed,
             **kwargs,
         )
-
     elif outcome_type == "neg_binomial":
-        # Same linear predictor
-        eta = X @ W_x + Z @ W_z + b  
-        mu = np.exp(eta)
-    
-        # Choose a dispersion; larger r = less overdispersion
-        r = 2.0  # or a vector of length n_outcomes
-    
-        # NB sampling with mean mu and dispersion r:
-        # p = r / (r + mu), size = r
-        p = r / (r + mu)
-        Y = np.random.negative_binomial(n=r, p=p, size=mu.shape).astype(np.float32)
-
+        X, Y, params = simulate_neg_binomial_data(
+            n_samples=n_samples,
+            n_features=n_features,
+            n_outcomes=n_outcomes,
+            latent_dim=latent_dim,
+            seed=seed,
+            **kwargs,
+        )
     else:
         raise ValueError(
-            "outcome_type must be one of {'bernoulli', 'gaussian', 'poisson'}."
+            "outcome_type must be one of {'bernoulli', 'gaussian', 'poisson', 'neg_binomial'}."
         )
 
     # Record outcome_type at this level as well
