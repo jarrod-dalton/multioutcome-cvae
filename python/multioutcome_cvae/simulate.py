@@ -425,6 +425,20 @@ def simulate_cvae_data(
             seed=seed,
             **kwargs,
         )
+
+    elif outcome_type == "neg_binomial":
+        # Same linear predictor
+        eta = X @ W_x + Z @ W_z + b  
+        mu = np.exp(eta)
+    
+        # Choose a dispersion; larger r = less overdispersion
+        r = 2.0  # or a vector of length n_outcomes
+    
+        # NB sampling with mean mu and dispersion r:
+        # p = r / (r + mu), size = r
+        p = r / (r + mu)
+        Y = np.random.negative_binomial(n=r, p=p, size=mu.shape).astype(np.float32)
+
     else:
         raise ValueError(
             "outcome_type must be one of {'bernoulli', 'gaussian', 'poisson'}."
