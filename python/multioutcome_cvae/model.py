@@ -6,10 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.special import gammaln  # PyTorch >= 1.8
 
 # ---------------------------------------------------------------------------
 # Log-likelihood helper functions (used in tests and potentially by users)
 # ---------------------------------------------------------------------------
+
 
 def _bernoulli_loglik(y: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     """
@@ -93,6 +95,54 @@ def _poisson_loglik(
     return ll_mat.sum()
 
 
+def _neg_binomial_nll(
+    y: torch.Tensor,
+    log_mu: torch.Tensor,
+    log_r: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Negative binomial negative log-likelihood (sum over all elements).
+
+    Parameterization:
+      mean mu > 0, dispersion r > 0
+      Var(Y) = mu + mu^2 / r
+
+    We use:
+      Y ~ NB(r, p), with
+        mean = r * (1 - p) / p = mu
+        p = r / (r + mu)
+
+    log p(Y = y) =
+        lgamma(y + r) - lgamma(r) - lgamma(y + 1)
+        + r * log(r / (r + mu))
+        + y * log(mu / (r + mu))
+    """
+    mu = torch.exp(log_mu)
+    r = torch.exp(log_r)
+
+    # Avoid degeneracies
+    mu = torch.clamp(mu, min=1e-8)
+    r = torch.clamp(r, min=1e-8)
+
+    # log p(y)
+    t1 = gammaln(y + r) - gammaln(r)  # -gammaln(y+1) is constant wrt params
+
+    log_r_over_rplusmu = torch.log(r) - torch.log(r + mu)
+    log_mu_over_rplusmu = torch.log(mu) - torch.log(r + mu)
+
+    t2 = r * log_r_over_rplusmu
+    t3 = y * log_mu_over_rplusmu
+
+    log_p = t1 + t2 + t3
+
+    if mask is not None:
+        log_p = log_p * mask
+
+    # Negative log-likelihood (sum)
+    return -torch.sum(log_p)
+
+
 VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson", "neg_binomial")
 
 
@@ -108,6 +158,7 @@ class XYDataset(Dataset):
         Optional mask over Y: 1 = observed, 0 = missing.
         If None, all entries are treated as observed.
     """
+
     def __init__(self, X: np.ndarray, Y: np.ndarray, mask: Optional[np.ndarray] = None):
         assert X.ndim == 2
         assert Y.ndim == 2
@@ -138,7 +189,7 @@ class MultivariateOutcomeCVAE(nn.Module):
     """
     Conditional VAE for multivariate outcomes with selectable family:
 
-      outcome_type ∈ {"bernoulli", "gaussian", "poisson"}
+      outcome_type ∈ {"bernoulli", "gaussian", "poisson", "neg_binomial"}
 
     Encoder: q(z | x, y)
     Decoder: p(y | x, z)
@@ -199,6 +250,7 @@ class MultivariateOutcomeCVAE(nn.Module):
         elif outcome_type == "poisson":
             self.dec_log_rate = nn.Linear(dec_last_dim, y_dim)
         elif outcome_type == "neg_binomial":
+            # Parameterization: log_mu and log_r
             self.dec_log_mu = nn.Linear(dec_last_dim, y_dim)
             self.dec_log_r = nn.Linear(dec_last_dim, y_dim)
 
@@ -232,18 +284,21 @@ class MultivariateOutcomeCVAE(nn.Module):
             return {"log_rate": log_rate}
         elif self.outcome_type == "neg_binomial":
             log_mu = self.dec_log_mu(h)
-            log_r  = self.dec_log_r(h)
+            log_r = self.dec_log_r(h)
             return {"log_mu": log_mu, "log_r": log_r}
         else:
             raise ValueError("Invalid outcome_type.")
 
-    
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         """
         Standard forward pass: encode -> reparameterize -> decode.
-        Returns:
-            out: decoder outputs (family-specific)
-            mu_z, logvar_z: parameters of q(z | x, y)
+
+        Returns
+        -------
+        out : dict
+            Decoder outputs (family-specific).
+        mu_z, logvar_z : torch.Tensor
+            Parameters of q(z | x, y).
         """
         mu_z, logvar_z = self.encode(x, y)
         z = self.reparameterize(mu_z, logvar_z)
@@ -251,20 +306,6 @@ class MultivariateOutcomeCVAE(nn.Module):
         return out, mu_z, logvar_z
 
 
-# Example usage:
-#
-# from multioutcome_cvae import CVAETrainer
-#
-# trainer = CVAETrainer(
-#     x_dim=5,
-#     y_dim=10,
-#     latent_dim=8,
-#     outcome_type="bernoulli",
-#     hidden_dim=64,
-#     n_hidden_layers=2,
-# )
-# trainer.fit(X_train, Y_train)
-#
 class CVAETrainer:
     """
     CVAETrainer
@@ -356,60 +397,12 @@ class CVAETrainer:
             self._fit_standardizer(X)
         return (X - self.x_mean) / self.x_std
 
-    # --------- negative binomial: -log likelihood ---------
-    import math
-    from torch.special import gammaln  # PyTorch >= 1.8
-    
-    def _neg_binomial_nll(y: torch.Tensor,
-                          log_mu: torch.Tensor,
-                          log_r: torch.Tensor,
-                          mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Negative binomial negative log-likelihood (sum over all elements).
-    
-        Parameterization:
-          mean mu > 0, dispersion r > 0
-          Var(Y) = mu + mu^2 / r
-    
-        We use:
-          Y ~ NB(r, p),  with
-            mean = r * (1 - p) / p = mu
-            p = r / (r + mu)
-    
-        log p(Y = y) =
-            lgamma(y + r) - lgamma(r) - lgamma(y + 1)
-            + r * log(r / (r + mu))
-            + y * log(mu / (r + mu))
-        """
-        mu = torch.exp(log_mu)
-        r  = torch.exp(log_r)
-    
-        # Avoid degeneracies
-        mu = torch.clamp(mu, min=1e-8)
-        r  = torch.clamp(r,  min=1e-8)
-    
-        # log p(y)
-        t1 = gammaln(y + r) - gammaln(r)  # - gammaln(y+1) is constant in params; can omit
-        log_r_over_rplusmu = torch.log(r) - torch.log(r + mu)
-        log_mu_over_rplusmu = torch.log(mu) - torch.log(r + mu)
-    
-        t2 = r * log_r_over_rplusmu
-        t3 = y * log_mu_over_rplusmu
-    
-        log_p = t1 + t2 + t3
-    
-        if mask is not None:
-            log_p = log_p * mask
-    
-        # Negative log-likelihood (sum)
-        return -torch.sum(log_p)
-    
     # --------- reconstruction loss by outcome family ---------
     def _recon_loss(
         self,
         y: torch.Tensor,
         out: Dict[str, torch.Tensor],
-        mask: torch.Tensor | None = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.outcome_type == "bernoulli":
             logits = out["logits"]
@@ -421,7 +414,7 @@ class CVAETrainer:
                 return F.binary_cross_entropy_with_logits(
                     logits, y, reduction="sum"
                 )
-    
+
         elif self.outcome_type == "gaussian":
             mu = out["mu"]
             logvar = out["logvar"]
@@ -433,7 +426,7 @@ class CVAETrainer:
                 return 0.5 * torch.sum(
                     logvar + (y - mu) ** 2 / torch.exp(logvar)
                 )
-    
+
         elif self.outcome_type == "poisson":
             log_rate = out["log_rate"]
             rate = torch.exp(log_rate)
@@ -441,15 +434,14 @@ class CVAETrainer:
                 return torch.sum(mask * (rate - y * log_rate))
             else:
                 return torch.sum(rate - y * log_rate)
-    
+
         elif self.outcome_type == "neg_binomial":
             log_mu = out["log_mu"]
-            log_r  = out["log_r"]
+            log_r = out["log_r"]
             return _neg_binomial_nll(y, log_mu, log_r, mask=mask)
-    
+
         else:
             raise ValueError("Invalid outcome_type for recon loss.")
-
 
     # --------- training ---------
     def fit(
@@ -468,7 +460,6 @@ class CVAETrainer:
         Y_mask_val: Optional[np.ndarray] = None,
         epochs: Optional[int] = None,
     ) -> Dict[str, Any]:
-
         """
         Fit the CVAE.
 
@@ -642,7 +633,7 @@ class CVAETrainer:
             out = self.model.decode(x_tensor, z)
             logits = out["logits"]
         return logits
-    
+
     # --------- prediction: distribution parameters ---------
     def predict_params(
         self,
@@ -652,7 +643,18 @@ class CVAETrainer:
         """
         Return predictive distribution parameters for Y | X.
 
-        (docstring unchanged)
+        bernoulli:
+            {"probs": p_ij}
+
+        gaussian:
+            {"mu": mu_pred_ij, "sigma": sigma_pred_ij}
+
+        poisson:
+            {"rate": lambda_pred_ij, "var_y": var_y_pred_ij}
+              where var_y approximates Var(Y_ij | X_i) under the mixture.
+
+        neg_binomial:
+            {"mu": mu_pred_ij, "var_y": var_y_pred_ij}
         """
         assert self.trained, "Model must be trained first."
         X = np.asarray(X, dtype=np.float32)
@@ -671,6 +673,7 @@ class CVAETrainer:
             return {"probs": probs}
 
         elif self.outcome_type == "gaussian":
+            # predictive mean and variance via mixture moments
             sum_mu = torch.zeros((n, self.y_dim), device=self.device)
             sum_m2_plus_var = torch.zeros((n, self.y_dim), device=self.device)
 
@@ -693,6 +696,7 @@ class CVAETrainer:
             }
 
         elif self.outcome_type == "poisson":
+            # mixture of Poissons; E[Y] = E[lambda], Var[Y] = E[lambda] + Var[lambda]
             sum_rate = torch.zeros((n, self.y_dim), device=self.device)
             sum_rate_sq = torch.zeros((n, self.y_dim), device=self.device)
 
@@ -714,25 +718,25 @@ class CVAETrainer:
             }
 
         elif self.outcome_type == "neg_binomial":
-            # mixture of Negative Binomials; we track mean and Var(Y)
+            # mixture of Negative Binomials; track mean and Var(Y)
             sum_mu = torch.zeros((n, self.y_dim), device=self.device)
             sum_Ey2 = torch.zeros((n, self.y_dim), device=self.device)
-        
+
             for out in outs:
                 log_mu = out["log_mu"]
-                log_r  = out["log_r"]
+                log_r = out["log_r"]
                 mu = torch.exp(log_mu)
-                r  = torch.exp(log_r)
-        
-                var_y = mu + mu**2 / r
-                sum_mu  += mu
-                sum_Ey2 += var_y + mu**2  # E[Y^2] = Var(Y) + (E[Y])^2
-        
+                r = torch.exp(log_r)
+
+                var_y = mu + mu ** 2 / r
+                sum_mu += mu
+                sum_Ey2 += var_y + mu ** 2  # E[Y^2] = Var(Y) + (E[Y])^2
+
             mu_pred = sum_mu / float(n_mc)
             Ey2 = sum_Ey2 / float(n_mc)
-            var_pred = Ey2 - mu_pred**2
+            var_pred = Ey2 - mu_pred ** 2
             var_pred = torch.clamp(var_pred, min=1e-8)
-        
+
             return {
                 "mu": mu_pred.cpu().numpy(),
                 "var_y": var_pred.cpu().numpy(),
@@ -747,6 +751,14 @@ class CVAETrainer:
         X: np.ndarray,
         n_mc: int = 20,
     ) -> np.ndarray:
+        """
+        Predict E[Y | X].
+
+        - bernoulli: probabilities
+        - gaussian: predictive mean
+        - poisson:  predictive mean (rate)
+        - neg_binomial: predictive mean
+        """
         params = self.predict_params(X, n_mc=n_mc)
         if self.outcome_type == "bernoulli":
             return params["probs"]
@@ -766,6 +778,8 @@ class CVAETrainer:
     ) -> np.ndarray:
         """
         For backward compatibility: only valid for Bernoulli outcomes.
+
+        For non-Bernoulli outcome types, use predict_mean() or predict_params().
         """
         if self.outcome_type != "bernoulli":
             raise ValueError(
@@ -842,7 +856,18 @@ class CVAETrainer:
         """
         Generate samples from p(Y | X).
 
-        (docstring unchanged)
+        - bernoulli:
+            - return_probs=True : probabilities (via MC mean)
+            - return_probs=False: Bernoulli samples
+        - gaussian:
+            - return_probs=True : predictive means
+            - return_probs=False: Normal samples
+        - poisson:
+            - return_probs=True : predictive rates (lambda)
+            - return_probs=False: Poisson samples
+        - neg_binomial:
+            - return_probs=True : predictive means
+            - return_probs=False: NB samples
         """
         assert self.trained, "Model must be trained first."
 
@@ -860,6 +885,8 @@ class CVAETrainer:
                 return params["mu"]
             elif self.outcome_type == "poisson":
                 return params["rate"]
+            elif self.outcome_type == "neg_binomial":
+                return params["mu"]
             else:
                 raise ValueError("Invalid outcome_type.")
 
@@ -891,17 +918,17 @@ class CVAETrainer:
                 rate = torch.exp(log_rate)
                 pois = torch.distributions.Poisson(rate)
                 y_samples = pois.sample().cpu().numpy().astype(np.int32)
-                
+
             elif self.outcome_type == "neg_binomial":
                 log_mu = out["log_mu"]
-                log_r  = out["log_r"]
+                log_r = out["log_r"]
                 mu = torch.exp(log_mu)
-                r  = torch.exp(log_r)
-            
+                r = torch.exp(log_r)
+
                 # NB parameterization: total_count = r, probability p = r / (r + mu)
                 p = r / (r + mu)
                 p = torch.clamp(p, min=1e-6, max=1.0 - 1e-6)
-            
+
                 nb = torch.distributions.NegativeBinomial(total_count=r, probs=p)
                 y_samples = nb.sample().cpu().numpy().astype(np.int32)
 
