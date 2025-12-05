@@ -96,7 +96,11 @@ def _poisson_loglik(
     return ll_mat.sum()
 
 
-# --------- negative binomial: -log likelihood (with softplus) ---------
+# ---------------------------------------------------------------------------
+# Negative binomial NLL with softplus parameterization
+# ---------------------------------------------------------------------------
+
+
 def _neg_binomial_nll(
     y: torch.Tensor,
     raw_mu: torch.Tensor,
@@ -117,13 +121,12 @@ def _neg_binomial_nll(
 
     # Stabilized positive parameters
     mu = F.softplus(raw_mu) + eps
-    r  = F.softplus(raw_r)  + eps
+    r = F.softplus(raw_r) + eps
 
-    # NB(r, p) with mean mu:
-    #   p = r / (r + mu)
-    #   log p(y) = lgamma(y + r) - lgamma(r) - lgamma(y + 1)
-    #              + r * log(r / (r + mu)) + y * log(mu / (r + mu))
-
+    # log p(Y = y) under NB(r, p) with mean mu:
+    # p = r / (r + mu)
+    # log p(y) = lgamma(y + r) - lgamma(r) - lgamma(y + 1)
+    #            + r * log(r / (r + mu)) + y * log(mu / (r + mu))
     t1 = gammaln(y + r) - gammaln(r) - gammaln(y + 1.0)
 
     log_r_over_rplusmu = torch.log(r) - torch.log(r + mu)
@@ -248,9 +251,13 @@ class MultivariateOutcomeCVAE(nn.Module):
         elif outcome_type == "poisson":
             self.dec_log_rate = nn.Linear(dec_last_dim, y_dim)
         elif outcome_type == "neg_binomial":
-            # Raw (unconstrained) outputs; we transform with softplus later
+            # Mean is still a function of (x, z)
             self.dec_raw_mu = nn.Linear(dec_last_dim, y_dim)
-            self.dec_raw_r  = nn.Linear(dec_last_dim, y_dim)
+            # Dispersion r is global per outcome (not a function of x, z)
+            # Start near log(1) so r ~ 1 initially.
+            self.raw_r = nn.Parameter(torch.zeros(y_dim))
+        else:
+            raise ValueError("Invalid outcome_type.")
 
     def encode(self, x: torch.Tensor, y: torch.Tensor):
         h = torch.cat([x, y], dim=1)
@@ -281,9 +288,10 @@ class MultivariateOutcomeCVAE(nn.Module):
             log_rate = self.dec_log_rate(h)
             return {"log_rate": log_rate}
         elif self.outcome_type == "neg_binomial":
-            raw_mu = self.dec_raw_mu(h)
-            raw_r  = self.dec_raw_r(h)
-            # we *do not* softplus here; we keep raw values and transform later
+            raw_mu = self.dec_raw_mu(h)  # (batch, y_dim)
+            # expand the global per-outcome dispersion across the batch
+            raw_r = self.raw_r.unsqueeze(0).expand_as(raw_mu)
+            # keep them as "raw" here; we softplus inside the NLL
             return {"raw_mu": raw_mu, "raw_r": raw_r}
         else:
             raise ValueError("Invalid outcome_type.")
@@ -432,7 +440,7 @@ class CVAETrainer:
 
         elif self.outcome_type == "neg_binomial":
             raw_mu = out["raw_mu"]
-            raw_r  = out["raw_r"]
+            raw_r = out["raw_r"]
             return _neg_binomial_nll(y, raw_mu, raw_r, mask=mask)
 
         else:
@@ -520,15 +528,17 @@ class CVAETrainer:
 
                 optimizer.zero_grad()
                 out, mu_z, logvar_z = self.model(xb, yb)
+
                 recon_loss = self._recon_loss(yb, out, mask=mb)
                 kl_loss = -0.5 * torch.sum(
                     1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                 )
 
+                # Mild L2 penalty on NB raw parameters (to discourage huge mus/rs)
                 penalty = torch.tensor(0.0, device=self.device)
                 if self.outcome_type == "neg_binomial":
                     raw_mu = out["raw_mu"]
-                    raw_r  = out["raw_r"]
+                    raw_r = out["raw_r"]
                     penalty = 1e-5 * (raw_mu.pow(2).mean() + raw_r.pow(2).mean())
 
                 batch_sz = xb.size(0)
@@ -714,9 +724,9 @@ class CVAETrainer:
 
             for out in outs:
                 raw_mu = out["raw_mu"]
-                raw_r  = out["raw_r"]
+                raw_r = out["raw_r"]
                 mu = F.softplus(raw_mu) + 1e-8
-                r  = F.softplus(raw_r)  + 1e-8
+                r = F.softplus(raw_r) + 1e-8
 
                 var_y = mu + mu**2 / r
                 sum_mu  += mu
@@ -774,7 +784,7 @@ class CVAETrainer:
         if self.outcome_type != "bernoulli":
             raise ValueError(
                 "predict_proba() is only defined for outcome_type='bernoulli'. "
-                "Use predict_mean() or predict_params() for gaussian/poisson."
+                "Use predict_mean() or predict_params() for gaussian/poisson/neg_binomial."
             )
         params = self.predict_params(X, n_mc=n_mc)
         return params["probs"]
@@ -899,9 +909,9 @@ class CVAETrainer:
 
             elif self.outcome_type == "neg_binomial":
                 raw_mu = out["raw_mu"]
-                raw_r  = out["raw_r"]
+                raw_r = out["raw_r"]
                 mu = F.softplus(raw_mu) + 1e-8
-                r  = F.softplus(raw_r)  + 1e-8
+                r = F.softplus(raw_r) + 1e-8
 
                 # NB parameterization: total_count = r, probability p = r / (r + mu)
                 p = r / (r + mu)
@@ -919,7 +929,9 @@ class CVAETrainer:
                 return y_samples.reshape(n, n_samples_per_x, self.y_dim)
 
 
-# --------- tuning helpers ---------
+# ---------------------------------------------------------------------------
+# Tuning helpers (unchanged from your last version)
+# ---------------------------------------------------------------------------
 
 
 def tune_cvae_random_search(
