@@ -20,6 +20,7 @@ from .utils_diagnostics import (
     posterior_predictive_check_gaussian,
     posterior_predictive_check_poisson,
     posterior_predictive_check_neg_binomial,
+    conditional_ppc_by_feature_decile,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "posterior_predictive_check_gaussian",
     "posterior_predictive_check_poisson",
     "posterior_predictive_check_neg_binomial",
+    "conditional_ppc_by_feature_decile",
 ]
