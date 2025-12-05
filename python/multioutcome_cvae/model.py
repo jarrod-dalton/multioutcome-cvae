@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.special import gammaln  # PyTorch >= 1.8
 
+
 # ---------------------------------------------------------------------------
 # Log-likelihood helper functions (used in tests and potentially by users)
 # ---------------------------------------------------------------------------
@@ -95,38 +96,36 @@ def _poisson_loglik(
     return ll_mat.sum()
 
 
+
+# --------- negative binomial: -log likelihood (with softplus) ---------
 def _neg_binomial_nll(
+    self,
     y: torch.Tensor,
-    log_mu: torch.Tensor,
-    log_r: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
+    raw_mu: torch.Tensor,
+    raw_r: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    eps: float = 1e-8,
 ) -> torch.Tensor:
     """
     Negative binomial negative log-likelihood (sum over all elements).
 
-    Parameterization:
-      mean mu > 0, dispersion r > 0
-      Var(Y) = mu + mu^2 / r
+    We parameterize via unconstrained raw_mu, raw_r and map to
+        mu = softplus(raw_mu) > 0
+        r  = softplus(raw_r)  > 0
 
-    We use:
-      Y ~ NB(r, p), with
-        mean = r * (1 - p) / p = mu
-        p = r / (r + mu)
-
-    log p(Y = y) =
-        lgamma(y + r) - lgamma(r) - lgamma(y + 1)
-        + r * log(r / (r + mu))
-        + y * log(mu / (r + mu))
+    So that
+        Var(Y | X) = mu + mu^2 / r
     """
-    mu = torch.exp(log_mu)
-    r = torch.exp(log_r)
 
-    # Avoid degeneracies
-    mu = torch.clamp(mu, min=1e-6, max=50.0)
-    r  = torch.clamp(r,  min=1e-6, max=50.0)
+    # Stabilized positive parameters
+    mu = F.softplus(raw_mu) + eps
+    r  = F.softplus(raw_r)  + eps
 
-    # log p(y)
-    t1 = gammaln(y + r) - gammaln(r)  # -gammaln(y+1) is constant wrt params
+    # log p(Y = y) under NB(r, p) with mean mu:
+    # p = r / (r + mu)
+    # log p(y) = lgamma(y + r) - lgamma(r) - lgamma(y + 1)
+    #            + r * log(r / (r + mu)) + y * log(mu / (r + mu))
+    t1 = gammaln(y + r) - gammaln(r) - gammaln(y + 1.0)
 
     log_r_over_rplusmu = torch.log(r) - torch.log(r + mu)
     log_mu_over_rplusmu = torch.log(mu) - torch.log(r + mu)
@@ -139,7 +138,7 @@ def _neg_binomial_nll(
     if mask is not None:
         log_p = log_p * mask
 
-    # Negative log-likelihood (sum)
+    # Negative log-likelihood (sum over all entries)
     return -torch.sum(log_p)
 
 
@@ -250,9 +249,9 @@ class MultivariateOutcomeCVAE(nn.Module):
         elif outcome_type == "poisson":
             self.dec_log_rate = nn.Linear(dec_last_dim, y_dim)
         elif outcome_type == "neg_binomial":
-            # Parameterization: log_mu and log_r
-            self.dec_log_mu = nn.Linear(dec_last_dim, y_dim)
-            self.dec_log_r = nn.Linear(dec_last_dim, y_dim)
+            # Raw (unconstrained) outputs; we transform with softplus later
+            self.dec_raw_mu = nn.Linear(dec_last_dim, y_dim)
+            self.dec_raw_r  = nn.Linear(dec_last_dim, y_dim)
 
     def encode(self, x: torch.Tensor, y: torch.Tensor):
         h = torch.cat([x, y], dim=1)
@@ -283,11 +282,13 @@ class MultivariateOutcomeCVAE(nn.Module):
             log_rate = self.dec_log_rate(h)
             return {"log_rate": log_rate}
         elif self.outcome_type == "neg_binomial":
-            log_mu = self.dec_log_mu(h)
-            log_r = self.dec_log_r(h)
-            return {"log_mu": log_mu, "log_r": log_r}
+            raw_mu = self.dec_raw_mu(h)
+            raw_r  = self.dec_raw_r(h)
+            # we *do not* softplus here; we keep raw values and transform later
+            return {"raw_mu": raw_mu, "raw_r": raw_r}
         else:
             raise ValueError("Invalid outcome_type.")
+
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         """
@@ -436,9 +437,9 @@ class CVAETrainer:
                 return torch.sum(rate - y * log_rate)
 
         elif self.outcome_type == "neg_binomial":
-            log_mu = out["log_mu"]
-            log_r = out["log_r"]
-            return _neg_binomial_nll(y, log_mu, log_r, mask=mask)
+            raw_mu = out["raw_mu"]
+            raw_r  = out["raw_r"]
+            return self._neg_binomial_nll(y, raw_mu, raw_r, mask=mask)
 
         else:
             raise ValueError("Invalid outcome_type for recon loss.")
@@ -525,23 +526,18 @@ class CVAETrainer:
 
                 optimizer.zero_grad()
                 out, mu_z, logvar_z = self.model(xb, yb)
-
                 recon_loss = self._recon_loss(yb, out, mask=mb)
                 kl_loss = -0.5 * torch.sum(
                     1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                 )
-
-                batch_sz = xb.size(0)
-
-                if self.outcome_type == "neg_binomial":
-                    # L2 penalty on log parameters to avoid runaway sizes
-                    penalty = 1e-4 * (
-                        out["log_mu"].pow(2).sum() +
-                        out["log_r"].pow(2).sum()
-                    )
-                else:
-                    penalty = 0.0
                 
+                penalty = torch.tensor(0.0, device=self.device)
+                if self.outcome_type == "neg_binomial":
+                    raw_mu = out["raw_mu"]
+                    raw_r  = out["raw_r"]
+                    penalty = 1e-5 * (raw_mu.pow(2).mean() + raw_r.pow(2).mean())
+                
+                batch_sz = xb.size(0)
                 loss = (recon_loss + beta_kl * kl_loss + penalty) / batch_sz
                 loss.backward()
                 optimizer.step()
@@ -728,23 +724,23 @@ class CVAETrainer:
             }
 
         elif self.outcome_type == "neg_binomial":
-            # mixture of Negative Binomials; track mean and Var(Y)
+            # mixture over NB components; we track mean and Var(Y)
             sum_mu = torch.zeros((n, self.y_dim), device=self.device)
             sum_Ey2 = torch.zeros((n, self.y_dim), device=self.device)
 
             for out in outs:
-                log_mu = out["log_mu"]
-                log_r = out["log_r"]
-                mu = torch.exp(log_mu)
-                r = torch.exp(log_r)
+                raw_mu = out["raw_mu"]
+                raw_r  = out["raw_r"]
+                mu = F.softplus(raw_mu) + 1e-8
+                r  = F.softplus(raw_r)  + 1e-8
 
-                var_y = mu + mu ** 2 / r
-                sum_mu += mu
-                sum_Ey2 += var_y + mu ** 2  # E[Y^2] = Var(Y) + (E[Y])^2
+                var_y = mu + mu**2 / r
+                sum_mu  += mu
+                sum_Ey2 += var_y + mu**2  # E[Y^2] = Var(Y) + (E[Y])^2
 
             mu_pred = sum_mu / float(n_mc)
             Ey2 = sum_Ey2 / float(n_mc)
-            var_pred = Ey2 - mu_pred ** 2
+            var_pred = Ey2 - mu_pred**2
             var_pred = torch.clamp(var_pred, min=1e-8)
 
             return {
@@ -930,10 +926,10 @@ class CVAETrainer:
                 y_samples = pois.sample().cpu().numpy().astype(np.int32)
 
             elif self.outcome_type == "neg_binomial":
-                log_mu = out["log_mu"]
-                log_r = out["log_r"]
-                mu = torch.exp(log_mu)
-                r = torch.exp(log_r)
+                raw_mu = out["raw_mu"]
+                raw_r  = out["raw_r"]
+                mu = F.softplus(raw_mu) + 1e-8
+                r  = F.softplus(raw_r)  + 1e-8
 
                 # NB parameterization: total_count = r, probability p = r / (r + mu)
                 p = r / (r + mu)
