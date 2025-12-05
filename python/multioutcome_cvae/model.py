@@ -439,7 +439,7 @@ class CVAETrainer:
         elif self.outcome_type == "neg_binomial":
             raw_mu = out["raw_mu"]
             raw_r  = out["raw_r"]
-            return self._neg_binomial_nll(y, raw_mu, raw_r, mask=mask)
+            return _neg_binomial_nll(y, raw_mu, raw_r, mask=mask)
 
         else:
             raise ValueError("Invalid outcome_type for recon loss.")
