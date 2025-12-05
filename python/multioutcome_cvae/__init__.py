@@ -41,4 +41,5 @@ __all__ = [
     "plot_dependence_curve",
     "posterior_predictive_check_gaussian",
     "posterior_predictive_check_poisson",
+    "posterior_predictive_check_neg_binomial",
 ]
