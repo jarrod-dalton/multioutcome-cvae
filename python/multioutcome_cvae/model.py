@@ -535,7 +535,7 @@ class CVAETrainer:
 
                 if self.outcome_type == "neg_binomial":
                     # L2 penalty on log parameters to avoid runaway sizes
-                    penalty = 1e-4 * (
+                    penalty = 5e-4 * (
                         out["log_mu"].pow(2).sum() +
                         out["log_r"].pow(2).sum()
                     )
