@@ -543,170 +543,190 @@ def plot_dependence_curve(
 
 
 def posterior_predictive_check_gaussian(
-    trainer: Any,
+    trainer,
     X: np.ndarray,
     Y: np.ndarray,
     n_rep: int = 100,
     n_mc_params: int = 20,
     plot: bool = True,
-) -> Dict[str, Any]:
+):
     """
-    Posterior predictive check for Gaussian outcomes.
+    Posterior predictive check for Gaussian CVAE.
 
-    Uses the predictive distribution parameters from
-    trainer.predict_params(X, n_mc=...) to simulate replicated datasets
-    Y_rep ~ p(Y | X, model), and compares summaries (mean, variance)
-    to those of the observed Y.
+    We compare global mean and variance of Y with those from replicated
+    datasets drawn from the fitted CVAE.
 
-    Parameters
-    ----------
-    trainer : object
-        Must implement predict_params(X, n_mc=...) returning at least
-        {"mu": ..., "sigma": ...}.
-    X : np.ndarray, shape (n, p)
-    Y : np.ndarray, shape (n, d)
-    n_rep : int, default=100
-        Number of replicated datasets to simulate.
-    n_mc_params : int, default=20
-        Monte Carlo draws for parameters inside predict_params.
-    plot : bool, default=True
-        If True, show histograms of replicated summaries with observed
-        summary overlaid.
-
-    Returns
-    -------
-    result : dict
-        Contains observed and replicated summary statistics.
+    Returns a dict with:
+      - mean_rep : array of replicated means (length n_rep)
+      - var_rep  : array of replicated variances (length n_rep)
+      - mean_obs : observed global mean of Y
+      - var_obs  : observed global variance of Y
+      - fig      : matplotlib Figure or None
     """
-    X = np.asarray(X, dtype=np.float32)
+    assert trainer.outcome_type == "gaussian", \
+        "posterior_predictive_check_gaussian requires outcome_type='gaussian'"
+
     Y = np.asarray(Y, dtype=np.float32)
+    mean_obs = float(Y.mean())
+    var_obs = float(Y.var(ddof=0))
 
-    params = trainer.predict_params(X, n_mc=n_mc_params)
-    mu = np.asarray(params["mu"], dtype=np.float32)
-    sigma = np.asarray(params["sigma"], dtype=np.float32)
-    sigma = np.clip(sigma, 1e-6, None)
+    rep_means = []
+    rep_vars = []
 
-    n, d = Y.shape
-    obs_mean = Y.mean(axis=0)
-    obs_var = Y.var(axis=0, ddof=1)
+    for _ in range(n_rep):
+        Y_rep = trainer.generate(X, n_samples_per_x=1, return_probs=False)
+        rep_means.append(float(Y_rep.mean()))
+        rep_vars.append(float(Y_rep.var(ddof=0)))
 
-    rep_means = np.zeros((n_rep, d), dtype=np.float32)
-    rep_vars = np.zeros((n_rep, d), dtype=np.float32)
+    rep_means = np.asarray(rep_means)
+    rep_vars = np.asarray(rep_vars)
 
-    rng = np.random.default_rng(12345)
-    for r in range(n_rep):
-        eps = rng.standard_normal(size=(n, d)).astype(np.float32)
-        Y_rep = mu + sigma * eps
-        rep_means[r] = Y_rep.mean(axis=0)
-        rep_vars[r] = Y_rep.var(axis=0, ddof=1)
-
+    fig = None
     if plot:
-        # Plot distribution of the *average* across dimensions, for simplicity
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-        axes[0].hist(rep_means.mean(axis=1), bins=20, alpha=0.7)
-        axes[0].axvline(obs_mean.mean(), color="red", linewidth=2, label="observed")
+        axes[0].hist(rep_means, bins=30)
+        axes[0].axvline(mean_obs, color="red", lw=2, label="observed")
         axes[0].set_title("PPC (Gaussian): mean(Y)")
         axes[0].set_xlabel("Replicated means (avg over dims)")
         axes[0].set_ylabel("Frequency")
         axes[0].legend()
 
-        axes[1].hist(rep_vars.mean(axis=1), bins=20, alpha=0.7)
-        axes[1].axvline(obs_var.mean(), color="red", linewidth=2, label="observed")
+        axes[1].hist(rep_vars, bins=30)
+        axes[1].axvline(var_obs, color="red", lw=2, label="observed")
         axes[1].set_title("PPC (Gaussian): var(Y)")
         axes[1].set_xlabel("Replicated variances (avg over dims)")
         axes[1].set_ylabel("Frequency")
         axes[1].legend()
 
-        plt.tight_layout()
-        plt.show()
+        fig.tight_layout()
 
     return {
-        "obs_mean": obs_mean,
-        "obs_var": obs_var,
-        "rep_means": rep_means,
-        "rep_vars": rep_vars,
+        "mean_rep": rep_means,
+        "var_rep": rep_vars,
+        "mean_obs": mean_obs,
+        "var_obs": var_obs,
+        "fig": fig,
     }
 
-
 def posterior_predictive_check_poisson(
-    trainer: Any,
+    trainer,
     X: np.ndarray,
     Y: np.ndarray,
     n_rep: int = 100,
     n_mc_params: int = 20,
     plot: bool = True,
-) -> Dict[str, Any]:
+):
     """
-    Posterior predictive check for Poisson outcomes.
+    Posterior predictive check for Poisson CVAE.
 
-    Uses predictive rate parameters from trainer.predict_params(X, n_mc=...)
-    to simulate replicated datasets Y_rep ~ Poisson(rate), and compares
-    summaries (mean, variance) to those of the observed Y.
+    Compares global mean and variance of Y with those from replicated
+    datasets drawn from the fitted Poisson CVAE.
 
-    Parameters
-    ----------
-    trainer : object
-        Must implement predict_params(X, n_mc=...) returning at least
-        {"rate": ...}.
-    X : np.ndarray, shape (n, p)
-    Y : np.ndarray, shape (n, d)
-    n_rep : int, default=100
-        Number of replicated datasets to simulate.
-    n_mc_params : int, default=20
-        Monte Carlo draws inside predict_params.
-    plot : bool, default=True
-        If True, show histograms of replicated summaries with observed
-        summary overlaid.
-
-    Returns
-    -------
-    result : dict
-        Contains observed and replicated summary statistics.
+    Returns the same keys as the Gaussian PPC:
+      - mean_rep, var_rep, mean_obs, var_obs, fig
     """
-    X = np.asarray(X, dtype=np.float32)
+    assert trainer.outcome_type == "poisson", \
+        "posterior_predictive_check_poisson requires outcome_type='poisson'"
+
     Y = np.asarray(Y, dtype=np.float32)
+    mean_obs = float(Y.mean())
+    var_obs = float(Y.var(ddof=0))
 
-    params = trainer.predict_params(X, n_mc=n_mc_params)
-    rate = np.asarray(params["rate"], dtype=np.float32)
-    rate = np.clip(rate, 1e-8, None)
+    rep_means = []
+    rep_vars = []
 
-    n, d = Y.shape
-    obs_mean = Y.mean(axis=0)
-    obs_var = Y.var(axis=0, ddof=1)
+    for _ in range(n_rep):
+        Y_rep = trainer.generate(X, n_samples_per_x=1, return_probs=False)
+        rep_means.append(float(Y_rep.mean()))
+        rep_vars.append(float(Y_rep.var(ddof=0)))
 
-    rep_means = np.zeros((n_rep, d), dtype=np.float32)
-    rep_vars = np.zeros((n_rep, d), dtype=np.float32)
+    rep_means = np.asarray(rep_means)
+    rep_vars = np.asarray(rep_vars)
 
-    rng = np.random.default_rng(23456)
-    for r in range(n_rep):
-        Y_rep = rng.poisson(lam=rate, size=(n, d)).astype(np.float32)
-        rep_means[r] = Y_rep.mean(axis=0)
-        rep_vars[r] = Y_rep.var(axis=0, ddof=1)
-
+    fig = None
     if plot:
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-        axes[0].hist(rep_means.mean(axis=1), bins=20, alpha=0.7)
-        axes[0].axvline(obs_mean.mean(), color="red", linewidth=2, label="observed")
+        axes[0].hist(rep_means, bins=30)
+        axes[0].axvline(mean_obs, color="red", lw=2, label="observed")
         axes[0].set_title("PPC (Poisson): mean(Y)")
         axes[0].set_xlabel("Replicated means (avg over dims)")
         axes[0].set_ylabel("Frequency")
         axes[0].legend()
 
-        axes[1].hist(rep_vars.mean(axis=1), bins=20, alpha=0.7)
-        axes[1].axvline(obs_var.mean(), color="red", linewidth=2, label="observed")
+        axes[1].hist(rep_vars, bins=30)
+        axes[1].axvline(var_obs, color="red", lw=2, label="observed")
         axes[1].set_title("PPC (Poisson): var(Y)")
         axes[1].set_xlabel("Replicated variances (avg over dims)")
         axes[1].set_ylabel("Frequency")
         axes[1].legend()
 
-        plt.tight_layout()
-        plt.show()
+        fig.tight_layout()
 
     return {
-        "obs_mean": obs_mean,
-        "obs_var": obs_var,
-        "rep_means": rep_means,
-        "rep_vars": rep_vars,
+        "mean_rep": rep_means,
+        "var_rep": rep_vars,
+        "mean_obs": mean_obs,
+        "var_obs": var_obs,
+        "fig": fig,
+    }
+
+def posterior_predictive_check_neg_binomial(
+    trainer,
+    X: np.ndarray,
+    Y: np.ndarray,
+    n_rep: int = 100,
+    n_mc_params: int = 20,
+    plot: bool = True,
+):
+    """
+    Posterior predictive check for Negative Binomial CVAE.
+
+    Same interface as the Gaussian/Poisson PPCs.
+    """
+    assert trainer.outcome_type == "neg_binomial", \
+        "posterior_predictive_check_neg_binomial requires outcome_type='neg_binomial'"
+
+    Y = np.asarray(Y, dtype=np.float32)
+    mean_obs = float(Y.mean())
+    var_obs = float(Y.var(ddof=0))
+
+    rep_means = []
+    rep_vars = []
+
+    for _ in range(n_rep):
+        Y_rep = trainer.generate(X, n_samples_per_x=1, return_probs=False)
+        rep_means.append(float(Y_rep.mean()))
+        rep_vars.append(float(Y_rep.var(ddof=0)))
+
+    rep_means = np.asarray(rep_means)
+    rep_vars = np.asarray(rep_vars)
+
+    fig = None
+    if plot:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+        axes[0].hist(rep_means, bins=30)
+        axes[0].axvline(mean_obs, color="red", lw=2, label="observed")
+        axes[0].set_title("PPC (NegBin): mean(Y)")
+        axes[0].set_xlabel("Replicated means (avg over dims)")
+        axes[0].set_ylabel("Frequency")
+        axes[0].legend()
+
+        axes[1].hist(rep_vars, bins=30)
+        axes[1].axvline(var_obs, color="red", lw=2, label="observed")
+        axes[1].set_title("PPC (NegBin): var(Y)")
+        axes[1].set_xlabel("Replicated variances (avg over dims)")
+        axes[1].set_ylabel("Frequency")
+        axes[1].legend()
+
+        fig.tight_layout()
+
+    return {
+        "mean_rep": rep_means,
+        "var_rep": rep_vars,
+        "mean_obs": mean_obs,
+        "var_obs": var_obs,
+        "fig": fig,
     }
