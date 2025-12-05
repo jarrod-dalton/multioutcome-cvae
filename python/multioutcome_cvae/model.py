@@ -122,8 +122,8 @@ def _neg_binomial_nll(
     r = torch.exp(log_r)
 
     # Avoid degeneracies
-    mu = torch.clamp(mu, min=1e-8)
-    r = torch.clamp(r, min=1e-8)
+    mu = torch.clamp(mu, min=1e-6, max=50.0)
+    r  = torch.clamp(r,  min=1e-6, max=50.0)
 
     # log p(y)
     t1 = gammaln(y + r) - gammaln(r)  # -gammaln(y+1) is constant wrt params
@@ -532,7 +532,17 @@ class CVAETrainer:
                 )
 
                 batch_sz = xb.size(0)
-                loss = (recon_loss + beta_kl * kl_loss) / batch_sz
+
+                if self.outcome_type == "neg_binomial":
+                    # L2 penalty on log parameters to avoid runaway sizes
+                    penalty = 1e-4 * (
+                        out["log_mu"].pow(2).sum() +
+                        out["log_r"].pow(2).sum()
+                    )
+                else:
+                    penalty = 0.0
+                
+                loss = (recon_loss + beta_kl * kl_loss + penalty) / batch_sz
                 loss.backward()
                 optimizer.step()
 
