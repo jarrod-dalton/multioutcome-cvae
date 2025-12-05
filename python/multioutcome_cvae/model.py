@@ -96,14 +96,12 @@ def _poisson_loglik(
     return ll_mat.sum()
 
 
-
 # --------- negative binomial: -log likelihood (with softplus) ---------
 def _neg_binomial_nll(
-    self,
     y: torch.Tensor,
     raw_mu: torch.Tensor,
     raw_r: torch.Tensor,
-    mask: torch.Tensor | None = None,
+    mask: Optional[torch.Tensor] = None,
     eps: float = 1e-8,
 ) -> torch.Tensor:
     """
@@ -121,10 +119,11 @@ def _neg_binomial_nll(
     mu = F.softplus(raw_mu) + eps
     r  = F.softplus(raw_r)  + eps
 
-    # log p(Y = y) under NB(r, p) with mean mu:
-    # p = r / (r + mu)
-    # log p(y) = lgamma(y + r) - lgamma(r) - lgamma(y + 1)
-    #            + r * log(r / (r + mu)) + y * log(mu / (r + mu))
+    # NB(r, p) with mean mu:
+    #   p = r / (r + mu)
+    #   log p(y) = lgamma(y + r) - lgamma(r) - lgamma(y + 1)
+    #              + r * log(r / (r + mu)) + y * log(mu / (r + mu))
+
     t1 = gammaln(y + r) - gammaln(r) - gammaln(y + 1.0)
 
     log_r_over_rplusmu = torch.log(r) - torch.log(r + mu)
@@ -289,7 +288,6 @@ class MultivariateOutcomeCVAE(nn.Module):
         else:
             raise ValueError("Invalid outcome_type.")
 
-
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         """
         Standard forward pass: encode -> reparameterize -> decode.
@@ -318,10 +316,6 @@ class CVAETrainer:
     - training loop (reconstruction + KL)
     - prediction and generation helpers
     - outcome-family-specific behavior
-
-    Parameters
-    ----------
-    (docstring unchanged; see earlier version)
     """
 
     def __init__(
@@ -530,13 +524,13 @@ class CVAETrainer:
                 kl_loss = -0.5 * torch.sum(
                     1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                 )
-                
+
                 penalty = torch.tensor(0.0, device=self.device)
                 if self.outcome_type == "neg_binomial":
                     raw_mu = out["raw_mu"]
                     raw_r  = out["raw_r"]
                     penalty = 1e-5 * (raw_mu.pow(2).mean() + raw_r.pow(2).mean())
-                
+
                 batch_sz = xb.size(0)
                 loss = (recon_loss + beta_kl * kl_loss + penalty) / batch_sz
                 loss.backward()
@@ -610,16 +604,6 @@ class CVAETrainer:
         """
         Internal helper used in tests: given standardized X, produce a single
         draw of decoder logits for Bernoulli outcomes.
-
-        Parameters
-        ----------
-        X_std : np.ndarray, shape (n, x_dim)
-            Standardized covariate matrix.
-
-        Returns
-        -------
-        torch.Tensor, shape (n, y_dim)
-            Decoder logits for Y | X, Z with a fixed Z sample.
         """
         assert self.outcome_type == "bernoulli", (
             "_forward_logits is only meaningful for outcome_type='bernoulli'."
@@ -807,18 +791,6 @@ class CVAETrainer:
         Log-likelihood-style evaluation for Bernoulli outcomes.
 
         For outcome_type != 'bernoulli', this is currently not implemented.
-
-        Parameters
-        ----------
-        X : np.ndarray, shape (n, x_dim)
-        Y : np.ndarray, shape (n, y_dim)
-        n_mc : int
-            Monte Carlo samples over z.
-        eps : float
-            Numerical epsilon to avoid log(0).
-        Y_mask : np.ndarray or None, shape (n, y_dim)
-            Optional mask over Y: 1 = observed, 0 = missing. If None,
-            all entries are treated as observed.
         """
         if self.outcome_type != "bernoulli":
             raise NotImplementedError(
