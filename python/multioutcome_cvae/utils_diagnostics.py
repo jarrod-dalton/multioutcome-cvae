@@ -12,7 +12,6 @@ from typing import Tuple, Optional, Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 __all__ = [
     "calibration_curve_with_ci",
     "plot_global_calibration",
@@ -23,6 +22,8 @@ __all__ = [
     "plot_dependence_curve",
     "posterior_predictive_check_gaussian",
     "posterior_predictive_check_poisson",
+    "posterior_predictive_check_neg_binomial",
+    "conditional_ppc_by_feature_decile",
 ]
 
 
@@ -728,5 +729,174 @@ def posterior_predictive_check_neg_binomial(
         "var_rep": rep_vars,
         "mean_obs": mean_obs,
         "var_obs": var_obs,
+        "fig": fig,
+    }
+
+def conditional_ppc_by_feature_decile(
+    trainer,
+    X,
+    Y,
+    feature_index: int = 1,
+    n_bins: int = 10,
+    n_rep: int = 100,
+    random_state: int = 123,
+    plot: bool = True,
+):
+    """
+    SHAP-style posterior predictive check by deciles of a single X feature.
+
+    For each decile of X[:, feature_index], we:
+      - compute the observed global mean and variance of Y (averaged over all
+        outcomes and rows in that decile);
+      - draw replicated datasets from the fitted CVAE and compute the same
+        summaries, building up a posterior predictive distribution.
+
+    Parameters
+    ----------
+    trainer : CVAETrainer
+        Fitted trainer object (typically outcome_type='neg_binomial' or 'poisson').
+
+    X : array-like, shape (n_samples, x_dim)
+        Covariate matrix used for fitting (or a held-out set).
+
+    Y : array-like, shape (n_samples, y_dim)
+        Outcome matrix corresponding to X.
+
+    feature_index : int, default=1
+        Column index of X to slice on (0-based). For "X[2]" use feature_index=2.
+
+    n_bins : int, default=10
+        Number of quantile bins (e.g., deciles).
+
+    n_rep : int, default=100
+        Number of replicated datasets to draw for each bin.
+
+    random_state : int, default=123
+        Seed for reproducibility of the PPC draws.
+
+    plot : bool, default=True
+        If True, produces a figure with:
+          - dependence plot for the mean
+          - dependence plot for the variance
+
+    Returns
+    -------
+    result : dict
+        {
+          "bin_edges": 1D array of bin edges (length n_bins + 1),
+          "bin_centers": 1D array of bin centers (length n_bins),
+          "mean_obs": 1D array of observed global means per bin,
+          "var_obs": 1D array of observed global variances per bin,
+          "mean_rep": 2D array (n_rep, n_bins) of replicated means,
+          "var_rep": 2D array (n_rep, n_bins) of replicated variances,
+          "fig": matplotlib Figure or None
+        }
+    """
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+
+    rng = np.random.default_rng(random_state)
+
+    x_col = X[:, feature_index]
+    # Quantile bin edges
+    qs = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_edges = np.quantile(x_col, qs)
+    # Ensure strictly increasing edges (in case of ties)
+    bin_edges[0] -= 1e-8
+    bin_edges[-1] += 1e-8
+
+    bin_idx = np.digitize(x_col, bin_edges) - 1  # 0..n_bins-1
+
+    mean_obs = np.full(n_bins, np.nan)
+    var_obs = np.full(n_bins, np.nan)
+    mean_rep = np.full((n_rep, n_bins), np.nan)
+    var_rep  = np.full((n_rep, n_bins), np.nan)
+
+    for b in range(n_bins):
+        mask = bin_idx == b
+        n_b = int(mask.sum())
+        if n_b == 0:
+            continue
+
+        X_b = X[mask]
+        Y_b = Y[mask]
+
+        # observed summaries (global over all outcomes in the slice)
+        mean_obs[b] = Y_b.mean()
+        var_obs[b]  = Y_b.var()
+
+        # replicated summaries
+        for r in range(n_rep):
+            # 1 draw per row; trainer.generate already samples over z
+            Y_rep_b = trainer.generate(X_b, n_samples_per_x=1, return_probs=False)
+            mean_rep[r, b] = Y_rep_b.mean()
+            var_rep[r, b]  = Y_rep_b.var()
+
+    # Bin centers for plotting on x-axis
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    fig = None
+    if plot:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True)
+        ax_mean, ax_var = axes
+
+        def _plot_dep(ax, rep_mat, obs_vec, ylabel: str, title: str):
+            # rep_mat: (n_rep, n_bins)
+            q_low, q_med, q_hi = np.nanpercentile(rep_mat, [5, 50, 95], axis=0)
+
+            ax.fill_between(
+                bin_centers,
+                q_low,
+                q_hi,
+                alpha=0.3,
+                linewidth=0,
+                label="PPC 5–95%",
+            )
+            ax.plot(
+                bin_centers,
+                q_med,
+                linestyle="-",
+                marker="o",
+                label="PPC median",
+            )
+            ax.plot(
+                bin_centers,
+                obs_vec,
+                linestyle="--",
+                marker="x",
+                color="black",
+                label="observed",
+            )
+            ax.set_xlabel(f"X[:, {feature_index}] (bin center)")
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+
+        _plot_dep(
+            ax_mean,
+            mean_rep,
+            mean_obs,
+            ylabel="Global mean of Y",
+            title="Conditional PPC: mean(Y) by X feature decile",
+        )
+
+        _plot_dep(
+            ax_var,
+            var_rep,
+            var_obs,
+            ylabel="Global variance of Y",
+            title="Conditional PPC: var(Y) by X feature decile",
+        )
+
+        handles, labels = ax_mean.get_legend_handles_labels()
+        ax_mean.legend(handles, labels, loc="best")
+        fig.tight_layout()
+
+    return {
+        "bin_edges": bin_edges,
+        "bin_centers": bin_centers,
+        "mean_obs": mean_obs,
+        "var_obs": var_obs,
+        "mean_rep": mean_rep,
+        "var_rep": var_rep,
         "fig": fig,
     }
