@@ -8,12 +8,29 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.special import gammaln  # PyTorch >= 1.8
 
+# ---------------------------------------------------------------------------
+# Currently supported are "bernoulli" (binary Y), "gaussian" (normal Y).
+# and "poisson" (count Y).
+#
+# In experimentation, the CVAE performed reasonably well for generated 
+# binary and continuous data. The Poisson model estimated conditional
+# means pretty well, but tended to under-estimate global variance
+# (overdispersion). Negative binomial is theoretically a good option in that
+# situation and is implemented in this file, but in experimentation
+# there was a lot of difficulty getting the CVAE to converge to
+# the right mean and variance parameters so it is not made available as
+# a valid outcome type currently.
+# ---------------------------------------------------------------------------
+
+# Publicly supported outcome families
+VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson")
+
+# Experimental / unstable:
+EXPERIMENTAL_OUTCOME_TYPES = ("neg_binomial",)
 
 # ---------------------------------------------------------------------------
 # Log-likelihood helper functions (used in tests and potentially by users)
 # ---------------------------------------------------------------------------
-
-
 def _bernoulli_loglik(y: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     """
     Sum log-likelihood for Bernoulli outcomes with given logits.
@@ -143,8 +160,6 @@ def _neg_binomial_nll(
     # Negative log-likelihood (sum over all entries)
     return -torch.sum(log_p)
 
-
-VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson", "neg_binomial")
 
 
 class XYDataset(Dataset):
@@ -396,8 +411,20 @@ class CVAETrainer:
         beta_kl: float = 1.0,
         device: Optional[str] = None,
     ):
-        assert outcome_type in VALID_OUTCOME_TYPES, \
-            f"outcome_type must be one of {VALID_OUTCOME_TYPES}"
+        if outcome_type not in VALID_OUTCOME_TYPES + EXPERIMENTAL_OUTCOME_TYPES:
+            raise ValueError(
+                f"outcome_type must be one of {VALID_OUTCOME_TYPES + EXPERIMENTAL_OUTCOME_TYPES}"
+            )
+        self.outcome_type = outcome_type
+        self.experimental_nb = (outcome_type in EXPERIMENTAL_OUTCOME_TYPES)
+
+        if self.experimental_nb:
+            raise NotImplementedError(
+                "Outcome type 'neg_binomial' is experimental and not yet "
+                "supported in the public API. This release only supports "
+                "outcome_type in {'bernoulli', 'gaussian', 'poisson'}."
+            )
+        
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
