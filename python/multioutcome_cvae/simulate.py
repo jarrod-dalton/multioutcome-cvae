@@ -532,10 +532,10 @@ def simulate_cvae_data(
             **kwargs,
         )
     elif outcome_type == "neg_binomial":
-    raise NotImplementedError(
-        "simulate_cvae_data(outcome_type='neg_binomial') is not yet supported. "
-        "This release supports 'bernoulli', 'gaussian', and 'poisson'."
-    )
+        raise NotImplementedError(
+            "simulate_cvae_data(outcome_type='neg_binomial') is not yet supported. "
+            "This release supports 'bernoulli', 'gaussian', and 'poisson'."
+        )
     #elif outcome_type == "neg_binomial":
     #    X, Y, params = simulate_neg_binomial_data(
     #        n_samples=n_samples,
