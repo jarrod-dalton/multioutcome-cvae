@@ -185,7 +185,6 @@ class XYDataset(Dataset):
         else:
             return self.X[idx], self.Y[idx], self.mask[idx]
 
-
 class MultivariateOutcomeCVAE(nn.Module):
     """
     Conditional VAE for multivariate outcomes with selectable family:
@@ -222,7 +221,7 @@ class MultivariateOutcomeCVAE(nn.Module):
         self.enc_hidden_dims = enc_hidden_dims
         self.dec_hidden_dims = dec_hidden_dims
 
-        # ----- Encoder over [x, y] -----
+        # ---------------- Encoder over [x, y] ----------------
         enc_input_dim = x_dim + y_dim
         self.enc_layers = nn.ModuleList()
         in_dim = enc_input_dim
@@ -234,7 +233,7 @@ class MultivariateOutcomeCVAE(nn.Module):
         self.enc_mu = nn.Linear(enc_last_dim, latent_dim)
         self.enc_logvar = nn.Linear(enc_last_dim, latent_dim)
 
-        # ----- Decoder over [x, z] -----
+        # ---------------- Decoder core over [x, z] ----------------
         dec_input_dim = x_dim + latent_dim
         self.dec_layers = nn.ModuleList()
         in_dim = dec_input_dim
@@ -243,21 +242,60 @@ class MultivariateOutcomeCVAE(nn.Module):
             in_dim = h_dim
         dec_last_dim = in_dim
 
+        # A small hidden size for the per-family heads
+        head_hidden = max(32, dec_last_dim // 2)
+
+        # ---------------- Family-specific heads + X skip ----------------
         if outcome_type == "bernoulli":
-            self.dec_out = nn.Linear(dec_last_dim, y_dim)  # logits
+            # logits(x, z) = head(h) + W_skip x
+            self.dec_logits_head = nn.Sequential(
+                nn.Linear(dec_last_dim, head_hidden),
+                nn.ReLU(),
+                nn.Linear(head_hidden, y_dim),
+            )
+            self.dec_logits_skip = nn.Linear(x_dim, y_dim)
+
         elif outcome_type == "gaussian":
-            self.dec_mu = nn.Linear(dec_last_dim, y_dim)
-            self.dec_logvar = nn.Linear(dec_last_dim, y_dim)
+            # mu(x, z) = head_mu(h) + W_skip_mu x
+            # logvar(x, z) = head_logvar(h)
+            self.dec_mu_head = nn.Sequential(
+                nn.Linear(dec_last_dim, head_hidden),
+                nn.ReLU(),
+                nn.Linear(head_hidden, y_dim),
+            )
+            self.dec_mu_skip = nn.Linear(x_dim, y_dim)
+
+            self.dec_logvar_head = nn.Sequential(
+                nn.Linear(dec_last_dim, head_hidden),
+                nn.ReLU(),
+                nn.Linear(head_hidden, y_dim),
+            )
+
         elif outcome_type == "poisson":
-            self.dec_log_rate = nn.Linear(dec_last_dim, y_dim)
+            # log_rate(x, z) = head(h) + W_skip x
+            self.dec_log_rate_head = nn.Sequential(
+                nn.Linear(dec_last_dim, head_hidden),
+                nn.ReLU(),
+                nn.Linear(head_hidden, y_dim),
+            )
+            self.dec_log_rate_skip = nn.Linear(x_dim, y_dim)
+
         elif outcome_type == "neg_binomial":
-            # Mean is still a function of (x, z)
-            self.dec_raw_mu = nn.Linear(dec_last_dim, y_dim)
-            # Dispersion r is global per outcome (not a function of x, z)
-            # Start near log(1) so r ~ 1 initially.
-            self.raw_r = nn.Parameter(torch.zeros(y_dim))
+            # raw_mu(x, z) = head(h) + W_skip x   (later softplus → mu > 0)
+            self.dec_raw_mu_head = nn.Sequential(
+                nn.Linear(dec_last_dim, head_hidden),
+                nn.ReLU(),
+                nn.Linear(head_hidden, y_dim),
+            )
+            self.dec_raw_mu_skip = nn.Linear(x_dim, y_dim)
+
+            # Global per-outcome dispersion r_j (unconstrained; later softplus)
+            self.dec_raw_r_global = nn.Parameter(torch.zeros(y_dim))
+
         else:
             raise ValueError("Invalid outcome_type.")
+
+    # ---------------- Encode / reparameterize / decode ----------------
 
     def encode(self, x: torch.Tensor, y: torch.Tensor):
         h = torch.cat([x, y], dim=1)
@@ -273,39 +311,55 @@ class MultivariateOutcomeCVAE(nn.Module):
         return mu + std * eps
 
     def decode(self, x: torch.Tensor, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Decoder p(y | x, z). Uses a shared core over [x, z] followed by
+        family-specific heads with X skip connections.
+        """
         h = torch.cat([x, z], dim=1)
         for layer in self.dec_layers:
             h = F.relu(layer(h))
 
         if self.outcome_type == "bernoulli":
-            logits = self.dec_out(h)
+            logits_core = self.dec_logits_head(h)
+            logits_skip = self.dec_logits_skip(x)
+            logits = logits_core + logits_skip
             return {"logits": logits}
+
         elif self.outcome_type == "gaussian":
-            mu = self.dec_mu(h)
-            logvar = self.dec_logvar(h)
+            mu_core = self.dec_mu_head(h)
+            mu_skip = self.dec_mu_skip(x)
+            mu = mu_core + mu_skip
+
+            logvar = self.dec_logvar_head(h)
             return {"mu": mu, "logvar": logvar}
+
         elif self.outcome_type == "poisson":
-            log_rate = self.dec_log_rate(h)
+            log_rate_core = self.dec_log_rate_head(h)
+            log_rate_skip = self.dec_log_rate_skip(x)
+            log_rate = log_rate_core + log_rate_skip
             return {"log_rate": log_rate}
+
         elif self.outcome_type == "neg_binomial":
-            raw_mu = self.dec_raw_mu(h)  # (batch, y_dim)
-            # expand the global per-outcome dispersion across the batch
-            raw_r = self.raw_r.unsqueeze(0).expand_as(raw_mu)
-            # keep them as "raw" here; we softplus inside the NLL
+            # Per-sample raw_mu with X skip
+            raw_mu_core = self.dec_raw_mu_head(h)
+            raw_mu_skip = self.dec_raw_mu_skip(x)
+            raw_mu = raw_mu_core + raw_mu_skip
+
+            # Global per-outcome raw_r, broadcast across batch
+            batch_size = x.size(0)
+            raw_r = self.dec_raw_r_global.unsqueeze(0).expand(batch_size, -1)
+
             return {"raw_mu": raw_mu, "raw_r": raw_r}
+
         else:
             raise ValueError("Invalid outcome_type.")
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         """
-        Standard forward pass: encode -> reparameterize -> decode.
-
-        Returns
-        -------
-        out : dict
-            Decoder outputs (family-specific).
-        mu_z, logvar_z : torch.Tensor
-            Parameters of q(z | x, y).
+        Encode -> reparameterize -> decode.
+        Returns:
+            out: decoder outputs (family-specific)
+            mu_z, logvar_z: parameters of q(z | x, y)
         """
         mu_z, logvar_z = self.encode(x, y)
         z = self.reparameterize(mu_z, logvar_z)
