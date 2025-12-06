@@ -532,14 +532,19 @@ def simulate_cvae_data(
             **kwargs,
         )
     elif outcome_type == "neg_binomial":
-        X, Y, params = simulate_neg_binomial_data(
-            n_samples=n_samples,
-            n_features=n_features,
-            n_outcomes=n_outcomes,
-            latent_dim=latent_dim,
-            seed=seed,
-            **kwargs,
-        )
+    raise NotImplementedError(
+        "simulate_cvae_data(outcome_type='neg_binomial') is not yet supported. "
+        "This release supports 'bernoulli', 'gaussian', and 'poisson'."
+    )
+    #elif outcome_type == "neg_binomial":
+    #    X, Y, params = simulate_neg_binomial_data(
+    #        n_samples=n_samples,
+    #        n_features=n_features,
+    #        n_outcomes=n_outcomes,
+    #        latent_dim=latent_dim,
+    #        seed=seed,
+    #        **kwargs,
+    #    )
     else:
         raise ValueError(
             "outcome_type must be one of {'bernoulli', 'gaussian', 'poisson', 'neg_binomial'}."
