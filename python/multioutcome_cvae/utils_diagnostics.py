@@ -7,10 +7,11 @@ observations and predictions, or on a CVAETrainer-like object that
 exposes `predict_params` / `predict_mean` / `generate`.
 """
 
+from __future__ import annotations
+
 from typing import Tuple, Optional, Dict, Any
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 __all__ = [
     "calibration_curve_with_ci",
@@ -24,7 +25,19 @@ __all__ = [
     "posterior_predictive_check_poisson",
     "posterior_predictive_check_neg_binomial",
     "conditional_ppc_by_feature_decile",
+    "bernoulli_dependence_metrics",
 ]
+
+
+def _plotting():
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError(
+            "Plotting requires the optional 'plot' extra: "
+            "pip install 'multioutcome-cvae[plot]'."
+        ) from exc
+    return plt
 
 
 # ---------------------------------------------------------------------
@@ -175,6 +188,7 @@ def plot_global_calibration(
     ax : matplotlib Axes
     """
     if ax is None:
+        plt = _plotting()
         fig, ax = plt.subplots(figsize=(6, 6))
 
     res = calibration_curve_with_ci(
@@ -263,6 +277,7 @@ def plot_per_outcome_calibration_grid(
     n_rows = int(np.ceil(n_outcomes / max_cols))
     n_cols = min(max_cols, n_outcomes)
 
+    plt = _plotting()
     fig, axes = plt.subplots(
         n_rows,
         n_cols,
@@ -523,6 +538,7 @@ def plot_dependence_curve(
     )
 
     if ax is None:
+        plt = _plotting()
         fig, ax = plt.subplots(figsize=(6, 4))
 
     ax.plot(grid_values, mean_preds, "-o")
@@ -584,6 +600,7 @@ def posterior_predictive_check_gaussian(
 
     fig = None
     if plot:
+        plt = _plotting()
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
         axes[0].hist(rep_means, bins=30)
@@ -647,6 +664,7 @@ def posterior_predictive_check_poisson(
 
     fig = None
     if plot:
+        plt = _plotting()
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
         axes[0].hist(rep_means, bins=30)
@@ -706,6 +724,7 @@ def posterior_predictive_check_neg_binomial(
 
     fig = None
     if plot:
+        plt = _plotting()
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
         axes[0].hist(rep_means, bins=30)
@@ -837,6 +856,7 @@ def conditional_ppc_by_feature_decile(
 
     fig = None
     if plot:
+        plt = _plotting()
         fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True)
         ax_mean, ax_var = axes
 
@@ -900,3 +920,55 @@ def conditional_ppc_by_feature_decile(
         "var_rep": var_rep,
         "fig": fig,
     }
+
+
+def bernoulli_dependence_metrics(
+    Y_true: np.ndarray,
+    Y_generated: np.ndarray,
+    predicted_probs: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Compare pairwise dependence in paired observed and generated outcomes."""
+    Y_true = np.asarray(Y_true, dtype=np.float64)
+    Y_generated = np.asarray(Y_generated, dtype=np.float64)
+    if Y_true.ndim != 2 or Y_generated.shape != Y_true.shape:
+        raise ValueError("Y_true and Y_generated must be matrices with the same shape.")
+    if Y_true.shape[0] < 2 or Y_true.shape[1] < 2:
+        raise ValueError("At least two rows and two outcomes are required.")
+    if not np.isin(Y_true, (0.0, 1.0)).all() or not np.isin(
+        Y_generated, (0.0, 1.0)
+    ).all():
+        raise ValueError("Y_true and Y_generated must contain only 0 and 1.")
+
+    upper = np.triu_indices(Y_true.shape[1], k=1)
+    observed_joint = (Y_true.T @ Y_true / Y_true.shape[0])[upper]
+    generated_joint = (Y_generated.T @ Y_generated / Y_generated.shape[0])[upper]
+    joint_difference = generated_joint - observed_joint
+
+    result = {
+        "n_pairs": int(len(observed_joint)),
+        "joint_probability_rmse": float(np.sqrt(np.mean(joint_difference**2))),
+        "joint_probability_mae": float(np.mean(np.abs(joint_difference))),
+    }
+
+    if predicted_probs is not None:
+        predicted_probs = np.asarray(predicted_probs, dtype=np.float64)
+        if predicted_probs.shape != Y_true.shape:
+            raise ValueError("predicted_probs must have the same shape as Y_true.")
+        if not np.isfinite(predicted_probs).all() or np.any(
+            (predicted_probs < 0.0) | (predicted_probs > 1.0)
+        ):
+            raise ValueError("predicted_probs must be finite values in [0, 1].")
+
+        observed_residual = Y_true - predicted_probs
+        generated_residual = Y_generated - predicted_probs
+        observed_cov = np.cov(observed_residual, rowvar=False, ddof=0)[upper]
+        generated_cov = np.cov(generated_residual, rowvar=False, ddof=0)[upper]
+        covariance_difference = generated_cov - observed_cov
+        result["residual_covariance_rmse"] = float(
+            np.sqrt(np.mean(covariance_difference**2))
+        )
+        result["residual_covariance_mae"] = float(
+            np.mean(np.abs(covariance_difference))
+        )
+
+    return result

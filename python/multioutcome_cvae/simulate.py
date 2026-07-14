@@ -18,9 +18,9 @@ utilities only.
 """
 
 from typing import Dict, Any, Optional, Tuple
+import warnings
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------
@@ -523,6 +523,11 @@ def simulate_cvae_data(
             **kwargs,
         )
     elif outcome_type == "poisson":
+        warnings.warn(
+            "Poisson CVAE support is deprecated and is not production-supported.",
+            FutureWarning,
+            stacklevel=2,
+        )
         X, Y, params = simulate_poisson_data(
             n_samples=n_samples,
             n_features=n_features,
@@ -608,6 +613,8 @@ def summarize_binary_matrix(
 
     fig = None
     if make_plot:
+        import matplotlib.pyplot as plt
+
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
         # Bar plot of means
@@ -694,6 +701,8 @@ def compare_real_vs_generated(
 
     fig = None
     if make_plot:
+        import matplotlib.pyplot as plt
+
         fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
         # Helper: plot corr with diagonal masked

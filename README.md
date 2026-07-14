@@ -182,11 +182,17 @@ This is the “Python consumer” side of the MLflow run created by `train_with_
 
 ## 5. Outcome families
 
-The core `CVAETrainer` supports three outcome types:
+Production-supported outcome types are:
 
 - `outcome_type="bernoulli"` – multivariate 0/1 outcomes  
 - `outcome_type="gaussian"`  – multivariate continuous outcomes  
-- `outcome_type="poisson"`   – multivariate count outcomes  
+
+Poisson support remains available for compatibility but is deprecated and is
+not production-supported. Negative Binomial remains experimental and is not
+available through `CVAETrainer`.
+
+Production fitting requires complete, finite `X` and `Y`. Perform any
+imputation upstream and apply the same preprocessing before inference.
 
 Key methods:
 
@@ -202,7 +208,58 @@ For all three families, the cross-dimension dependence in Y is induced through t
 
 ---
 
-## 6. R integration
+## 6. Standalone R inference
+
+A fitted Bernoulli decoder can be exported as a self-contained base-R source
+file. Python and PyTorch are not required after export:
+
+```python
+from multioutcome_cvae import export_bernoulli_r
+
+export_bernoulli_r(
+    trainer,
+    "cvae_model.R",
+    feature_names=["age", "score"],
+    outcome_names=["outcome_a", "outcome_b"],
+)
+```
+
+Source and use the generated model in R:
+
+```r
+source("cvae_model.R")
+
+# Deterministic decoder probabilities for supplied latent rows.
+Z <- matrix(rnorm(nrow(X_new) * latent_dim), nrow = nrow(X_new))
+p_given_z <- cvae_decoder_probabilities(X_new, Z)
+
+# Marginal probabilities E_z[p(Y_j = 1 | X, z)].
+p_marginal <- cvae_marginal_probabilities(
+  X_new,
+  n_mc = 50L,
+  seed = 123L,
+  inference_batch_size = 10000L
+)
+
+# Correlated outcome vectors through a shared latent draw per row/replicate.
+Y_sim <- cvae_simulate(
+  X_new,
+  n_samples_per_x = 10L,
+  seed = 123L,
+  inference_batch_size = 10000L
+)
+```
+
+Conditional on `X` and one shared latent row `Z`, the Bernoulli outcomes are
+sampled independently. Their marginal dependence is preserved because all
+outcomes in a generated vector use that same latent row. Do not independently
+sample from the Monte Carlo-averaged marginal probabilities when correlated
+vectors are required.
+
+See `python/multioutcome_cvae/examples/export_bernoulli_to_r.py` for a complete
+training and export example.
+
+## 7. Python-backed R integration
 
 Three R scripts (using **reticulate**) live under `R/`:
 
@@ -238,9 +295,10 @@ These provide a template for an **R-facing front end** that uses:
 
 ---
 
-## 7. Handling missing outcome values (Y)
+## 8. Legacy missing-outcome example
 
-The CVAE can be trained when **Y has missing elements**, under standard MCAR/MAR assumptions, by providing a **mask** for the observed entries.
+The repository retains an experimental masked-loss example for historical
+compatibility. It is not part of the production-supported complete-data path.
 
 ### Mask semantics
 
@@ -323,7 +381,7 @@ In this workflow:
 
 ---
 
-## 8. Databricks + MLflow
+## 9. Databricks + MLflow
 
 On Databricks, the typical workflow is:
 
@@ -338,7 +396,7 @@ On Databricks, the typical workflow is:
 
 ---
 
-## 9. Model Diagnostics
+## 10. Model Diagnostics
 
 ## Diagnostics, calibration, and posterior predictive checks
 
@@ -512,7 +570,7 @@ example that:
 
 ---
 
-## 10. Unit Tests
+## 11. Unit Tests
 
 This repository includes a small `/tests` directory with PyTest-based unit tests covering:
 

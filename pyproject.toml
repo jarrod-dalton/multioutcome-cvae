@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multioutcome-cvae"             # pip / distribution name
-version = "0.1.0"
+version = "0.2.0"
 description = "Conditional Variational Autoencoder for multivariate outcomes (Bernoulli, Gaussian, Poisson)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,9 +36,17 @@ classifiers = [
 dependencies = [
   "numpy>=1.20",
   "torch>=2.0",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.3"]
+tuning = ["hyperopt>=0.2"]
+mlflow = ["mlflow>=2.0"]
+test = ["pytest>=7"]
+all = [
   "matplotlib>=3.3",
-  "mlflow>=2.0",
   "hyperopt>=0.2",
+  "mlflow>=2.0",
 ]
 
 # Tell setuptools where packages live

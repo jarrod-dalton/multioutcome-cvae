@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Optional, Dict, Any, List
 import random
+import warnings
 
 import torch
 import torch.nn as nn
@@ -22,8 +23,13 @@ from torch.special import gammaln  # PyTorch >= 1.8
 # a valid outcome type currently.
 # ---------------------------------------------------------------------------
 
-# Publicly supported outcome families
-VALID_OUTCOME_TYPES = ("bernoulli", "gaussian", "poisson")
+# Production-supported outcome families
+PRODUCTION_OUTCOME_TYPES = ("bernoulli", "gaussian")
+
+# Retained for compatibility, without a production guarantee
+DEPRECATED_OUTCOME_TYPES = ("poisson",)
+
+VALID_OUTCOME_TYPES = PRODUCTION_OUTCOME_TYPES + DEPRECATED_OUTCOME_TYPES
 
 # Experimental / unstable:
 EXPERIMENTAL_OUTCOME_TYPES = ("neg_binomial",)
@@ -223,6 +229,12 @@ class MultivariateOutcomeCVAE(nn.Module):
         super().__init__()
         assert outcome_type in VALID_OUTCOME_TYPES, \
             f"outcome_type must be one of {VALID_OUTCOME_TYPES}"
+        if outcome_type in DEPRECATED_OUTCOME_TYPES:
+            warnings.warn(
+                "Poisson CVAE support is deprecated and is not production-supported.",
+                FutureWarning,
+                stacklevel=2,
+            )
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
@@ -461,6 +473,36 @@ class CVAETrainer:
         self.trained: bool = False
 
     # --------- standardization helpers ---------
+    @staticmethod
+    def _validate_matrix(
+        value: np.ndarray,
+        name: str,
+        expected_cols: int,
+    ) -> np.ndarray:
+        try:
+            array = np.asarray(value, dtype=np.float32)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a numeric matrix.") from exc
+
+        if array.ndim != 2:
+            raise ValueError(f"{name} must be a two-dimensional matrix.")
+        if array.shape[0] == 0:
+            raise ValueError(f"{name} must contain at least one row.")
+        if array.shape[1] != expected_cols:
+            raise ValueError(
+                f"{name} must contain exactly {expected_cols} columns; "
+                f"received {array.shape[1]}."
+            )
+        if not np.isfinite(array).all():
+            raise ValueError(f"{name} must contain only finite values.")
+        return array
+
+    def _validate_outcomes(self, Y: np.ndarray, name: str) -> np.ndarray:
+        Y = self._validate_matrix(Y, name, self.y_dim)
+        if self.outcome_type == "bernoulli" and not np.isin(Y, (0.0, 1.0)).all():
+            raise ValueError("Bernoulli outcomes must be exactly 0 or 1.")
+        return Y
+
     def _fit_standardizer(self, X_train: np.ndarray):
         mean = X_train.mean(axis=0)
         std = X_train.std(axis=0)
@@ -470,15 +512,13 @@ class CVAETrainer:
 
     def _standardize(self, X: np.ndarray) -> np.ndarray:
         """
-        Standardize X using stored mean/std. If the standardizer has not
-        been fit yet (x_mean/x_std is None), fit it on the provided X.
-
-        This makes it safe to call _standardize() before .fit(), which
-        is convenient in tests and quick exploratory use.
+        Standardize X using parameters fitted from the training data.
         """
-        X = np.asarray(X, dtype=np.float32)
         if self.x_mean is None or self.x_std is None:
-            self._fit_standardizer(X)
+            raise RuntimeError(
+                "The X standardizer has not been fitted. Call fit() first."
+            )
+        X = self._validate_matrix(X, "X", self.x_dim)
         return (X - self.x_mean) / self.x_std
 
     # --------- reconstruction loss by outcome family ---------
@@ -543,6 +583,10 @@ class CVAETrainer:
         Y_mask_train: Optional[np.ndarray] = None,
         Y_mask_val: Optional[np.ndarray] = None,
         epochs: Optional[int] = None,
+        kl_warmup_epochs: int = 0,
+        max_grad_norm: Optional[float] = None,
+        early_stopping_patience: Optional[int] = None,
+        early_stopping_min_delta: float = 0.0,
     ) -> Dict[str, Any]:
         """
         Fit the CVAE.
@@ -565,11 +609,47 @@ class CVAETrainer:
         lr = lr if lr is not None else self.lr
         beta_kl = beta_kl if beta_kl is not None else self.beta_kl
 
+        if not isinstance(num_epochs, (int, np.integer)) or num_epochs < 1:
+            raise ValueError("num_epochs must be a positive integer.")
+        if not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+        if not np.isfinite(lr) or lr <= 0:
+            raise ValueError("lr must be positive and finite.")
+        if not np.isfinite(beta_kl) or beta_kl < 0:
+            raise ValueError("beta_kl must be non-negative and finite.")
+        if not isinstance(kl_warmup_epochs, (int, np.integer)) or kl_warmup_epochs < 0:
+            raise ValueError("kl_warmup_epochs must be a non-negative integer.")
+        if max_grad_norm is not None and (
+            not np.isfinite(max_grad_norm) or max_grad_norm <= 0
+        ):
+            raise ValueError("max_grad_norm must be positive and finite or None.")
+        if early_stopping_patience is not None and (
+            not isinstance(early_stopping_patience, (int, np.integer))
+            or early_stopping_patience < 1
+        ):
+            raise ValueError("early_stopping_patience must be a positive integer or None.")
+        if not np.isfinite(early_stopping_min_delta) or early_stopping_min_delta < 0:
+            raise ValueError("early_stopping_min_delta must be non-negative and finite.")
+
+        X_train = self._validate_matrix(X_train, "X", self.x_dim)
+        Y_train = self._validate_outcomes(Y_train, "Y_train")
+        if X_train.shape[0] != Y_train.shape[0]:
+            raise ValueError("X and Y_train must contain the same number of rows.")
+
+        if (X_val is None) != (Y_val is None):
+            raise ValueError("X_val and Y_val must either both be provided or both be None.")
+        if X_val is not None:
+            X_val = self._validate_matrix(X_val, "X_val", self.x_dim)
+            Y_val = self._validate_outcomes(Y_val, "Y_val")
+            if X_val.shape[0] != Y_val.shape[0]:
+                raise ValueError("X_val and Y_val must contain the same number of rows.")
+
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
             random.seed(seed)
 
+        self._fit_standardizer(X_train)
         X_train_std = self._standardize(X_train)
 
         if X_val is not None:
@@ -588,12 +668,35 @@ class CVAETrainer:
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
-        history = {"train_loss": [], "val_loss": []}
+        history = {
+            "train_loss": [],
+            "train_recon_loss": [],
+            "train_recon_per_outcome": [],
+            "train_kl_loss": [],
+            "train_kl_per_latent": [],
+            "active_latent_units": [],
+            "effective_beta_kl": [],
+            "val_loss": [],
+            "val_recon_loss": [],
+            "val_recon_per_outcome": [],
+            "val_kl_loss": [],
+        }
+        best_val_loss = float("inf")
+        best_state = None
+        best_epoch = None
+        epochs_without_improvement = 0
 
         for epoch in range(1, num_epochs + 1):
             self.model.train()
-            train_loss_epoch = 0.0
-            n_batches = 0
+            train_total = 0.0
+            train_recon = 0.0
+            train_kl = 0.0
+            train_kl_by_latent = torch.zeros(self.latent_dim, device=self.device)
+            train_rows = 0
+            if kl_warmup_epochs > 0:
+                effective_beta_kl = beta_kl * min(1.0, epoch / kl_warmup_epochs)
+            else:
+                effective_beta_kl = beta_kl
 
             for batch in train_loader:
                 if len(batch) == 2:
@@ -614,6 +717,9 @@ class CVAETrainer:
                 kl_loss = -0.5 * torch.sum(
                     1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
                 )
+                kl_by_latent = -0.5 * torch.sum(
+                    1 + logvar_z - mu_z.pow(2) - logvar_z.exp(), dim=0
+                )
 
                 # Mild L2 penalty on NB raw parameters (to discourage huge mus/rs)
                 penalty = torch.tensor(0.0, device=self.device)
@@ -623,46 +729,102 @@ class CVAETrainer:
                     penalty = 1e-5 * (raw_mu.pow(2).mean() + raw_r.pow(2).mean())
 
                 batch_sz = xb.size(0)
-                loss = (recon_loss + beta_kl * kl_loss + penalty) / batch_sz
+                loss = (
+                    recon_loss + effective_beta_kl * kl_loss + penalty
+                ) / batch_sz
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        "Training loss became non-finite; check inputs and hyperparameters."
+                    )
                 loss.backward()
+                if max_grad_norm is not None:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_grad_norm
+                    )
+                    if not torch.isfinite(grad_norm):
+                        raise FloatingPointError("Training gradients became non-finite.")
                 optimizer.step()
 
-                train_loss_epoch += loss.item()
-                n_batches += 1
+                train_total += loss.item() * batch_sz
+                train_recon += recon_loss.item()
+                train_kl += kl_loss.item()
+                train_kl_by_latent += kl_by_latent.detach()
+                train_rows += batch_sz
 
-            train_loss_epoch /= max(1, n_batches)
+            train_loss_epoch = train_total / train_rows
+            train_recon_epoch = train_recon / train_rows
+            train_kl_epoch = train_kl / train_rows
             history["train_loss"].append(train_loss_epoch)
+            history["train_recon_loss"].append(train_recon_epoch)
+            history["train_recon_per_outcome"].append(
+                train_recon_epoch / self.y_dim
+            )
+            history["train_kl_loss"].append(train_kl_epoch)
+            kl_per_latent = (train_kl_by_latent / train_rows).cpu().numpy()
+            history["train_kl_per_latent"].append(kl_per_latent)
+            history["active_latent_units"].append(int(np.sum(kl_per_latent > 0.01)))
+            history["effective_beta_kl"].append(effective_beta_kl)
 
             val_loss_epoch = None
             if val_loader is not None:
                 self.model.eval()
-                val_loss = 0.0
-                n_val_batches = 0
-                with torch.no_grad():
-                    for batch in val_loader:
-                        if len(batch) == 2:
-                            xb, yb = batch
-                            mb = None
-                        else:
-                            xb, yb, mb = batch
+                val_total = 0.0
+                val_recon = 0.0
+                val_kl = 0.0
+                val_rows = 0
+                cuda_devices = []
+                if self.device.type == "cuda":
+                    cuda_devices = [self.device.index or torch.cuda.current_device()]
+                with torch.random.fork_rng(devices=cuda_devices):
+                    validation_seed = 0 if seed is None else seed + 1_000_000
+                    torch.manual_seed(validation_seed)
+                    with torch.no_grad():
+                        for batch in val_loader:
+                            if len(batch) == 2:
+                                xb, yb = batch
+                                mb = None
+                            else:
+                                xb, yb, mb = batch
 
-                        xb = xb.to(self.device)
-                        yb = yb.to(self.device)
-                        if mb is not None:
-                            mb = mb.to(self.device)
+                            xb = xb.to(self.device)
+                            yb = yb.to(self.device)
+                            if mb is not None:
+                                mb = mb.to(self.device)
 
-                        out, mu_z, logvar_z = self.model(xb, yb)
-                        recon_loss = self._recon_loss(yb, out, mask=mb)
-                        kl_loss = -0.5 * torch.sum(
-                            1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
-                        )
-                        batch_sz = xb.size(0)
-                        loss = (recon_loss + beta_kl * kl_loss) / batch_sz
-                        val_loss += loss.item()
-                        n_val_batches += 1
+                            out, mu_z, logvar_z = self.model(xb, yb)
+                            recon_loss = self._recon_loss(yb, out, mask=mb)
+                            kl_loss = -0.5 * torch.sum(
+                                1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
+                            )
+                            batch_sz = xb.size(0)
+                            loss = (
+                                recon_loss + effective_beta_kl * kl_loss
+                            ) / batch_sz
+                            val_total += loss.item() * batch_sz
+                            val_recon += recon_loss.item()
+                            val_kl += kl_loss.item()
+                            val_rows += batch_sz
 
-                val_loss_epoch = val_loss / max(1, n_val_batches)
+                    val_loss_epoch = val_total / val_rows
+                    val_recon_epoch = val_recon / val_rows
+                    val_kl_epoch = val_kl / val_rows
                 history["val_loss"].append(val_loss_epoch)
+                history["val_recon_loss"].append(val_recon_epoch)
+                history["val_recon_per_outcome"].append(
+                    val_recon_epoch / self.y_dim
+                )
+                history["val_kl_loss"].append(val_kl_epoch)
+
+                if val_loss_epoch < best_val_loss - early_stopping_min_delta:
+                    best_val_loss = val_loss_epoch
+                    best_epoch = epoch
+                    best_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in self.model.state_dict().items()
+                    }
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
 
             if verbose:
                 if val_loss_epoch is not None:
@@ -674,22 +836,33 @@ class CVAETrainer:
                 else:
                     print(f"Epoch {epoch:03d} | train loss: {train_loss_epoch:.4f}")
 
+            if (
+                val_loader is not None
+                and early_stopping_patience is not None
+                and epochs_without_improvement >= early_stopping_patience
+            ):
+                break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+
+        history["best_epoch"] = best_epoch
+        history["epochs_ran"] = len(history["train_loss"])
+
         self.trained = True
         return history
 
-    # --------- internal helper for MC over z ---------
-    def _decode_for_X(self, X_std: np.ndarray, n_mc: int):
-        """Internal helper: Monte Carlo over z, returns list of decoded outputs."""
-        n = X_std.shape[0]
-        x_tensor = torch.from_numpy(X_std).to(self.device)
-        outs = []
-        self.model.eval()
-        with torch.no_grad():
-            for _ in range(n_mc):
-                z = torch.randn((n, self.latent_dim), device=self.device)
-                out = self.model.decode(x_tensor, z)
-                outs.append(out)
-        return outs
+    @staticmethod
+    def _inference_slices(n_rows: int, inference_batch_size: Optional[int]):
+        if inference_batch_size is None:
+            inference_batch_size = n_rows
+        if (
+            not isinstance(inference_batch_size, (int, np.integer))
+            or inference_batch_size < 1
+        ):
+            raise ValueError("inference_batch_size must be a positive integer or None.")
+        for start in range(0, n_rows, int(inference_batch_size)):
+            yield slice(start, min(start + int(inference_batch_size), n_rows))
 
     def _forward_logits(self, X_std: np.ndarray) -> torch.Tensor:
         """
@@ -720,6 +893,7 @@ class CVAETrainer:
         self,
         X: np.ndarray,
         n_mc: int = 20,
+        inference_batch_size: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
         """
         Return predictive distribution parameters for Y | X.
@@ -737,100 +911,100 @@ class CVAETrainer:
         neg_binomial:
             {"mu": mu_pred_ij, "var_y": var_y_pred_ij}
         """
-        assert self.trained, "Model must be trained first."
-        X = np.asarray(X, dtype=np.float32)
+        if not self.trained:
+            raise RuntimeError("Model must be trained before prediction.")
+        if not isinstance(n_mc, (int, np.integer)) or n_mc < 1:
+            raise ValueError("n_mc must be a positive integer.")
+        X = self._validate_matrix(X, "X", self.x_dim)
         X_std = self._standardize(X)
         n = X.shape[0]
+        result_keys = {
+            "bernoulli": ("probs",),
+            "gaussian": ("mu", "sigma"),
+            "poisson": ("rate", "var_y"),
+            "neg_binomial": ("mu", "var_y"),
+        }
+        results = {
+            key: np.empty((n, self.y_dim), dtype=np.float32)
+            for key in result_keys[self.outcome_type]
+        }
 
-        outs = self._decode_for_X(X_std, n_mc=n_mc)
+        self.model.eval()
+        with torch.no_grad():
+            for row_slice in self._inference_slices(n, inference_batch_size):
+                x_tensor = torch.from_numpy(X_std[row_slice]).to(self.device)
+                batch_n = x_tensor.shape[0]
 
-        if self.outcome_type == "bernoulli":
-            acc = torch.zeros((n, self.y_dim), device=self.device)
-            for out in outs:
-                logits = out["logits"]
-                probs = torch.sigmoid(logits)
-                acc += probs
-            probs = (acc / float(n_mc)).cpu().numpy()
-            return {"probs": probs}
+                if self.outcome_type == "bernoulli":
+                    sum_probs = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    for _ in range(n_mc):
+                        z = torch.randn((batch_n, self.latent_dim), device=self.device)
+                        sum_probs += torch.sigmoid(self.model.decode(x_tensor, z)["logits"])
+                    results["probs"][row_slice] = (sum_probs / float(n_mc)).cpu().numpy()
 
-        elif self.outcome_type == "gaussian":
-            # predictive mean and variance via mixture moments
-            sum_mu = torch.zeros((n, self.y_dim), device=self.device)
-            sum_m2_plus_var = torch.zeros((n, self.y_dim), device=self.device)
+                elif self.outcome_type == "gaussian":
+                    sum_mu = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    sum_y2 = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    for _ in range(n_mc):
+                        out = self.model.decode(
+                            x_tensor,
+                            torch.randn((batch_n, self.latent_dim), device=self.device),
+                        )
+                        mu = out["mu"]
+                        sum_mu += mu
+                        sum_y2 += torch.exp(out["logvar"]) + mu.square()
+                    mu_pred = sum_mu / float(n_mc)
+                    var_pred = torch.clamp(
+                        sum_y2 / float(n_mc) - mu_pred.square(), min=1e-8
+                    )
+                    results["mu"][row_slice] = mu_pred.cpu().numpy()
+                    results["sigma"][row_slice] = torch.sqrt(var_pred).cpu().numpy()
 
-            for out in outs:
-                mu = out["mu"]
-                logvar = out["logvar"]
-                var = torch.exp(logvar)
-                sum_mu += mu
-                sum_m2_plus_var += var + mu ** 2
+                elif self.outcome_type == "poisson":
+                    sum_rate = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    sum_rate_sq = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    for _ in range(n_mc):
+                        out = self.model.decode(
+                            x_tensor,
+                            torch.randn((batch_n, self.latent_dim), device=self.device),
+                        )
+                        rate = torch.exp(out["log_rate"])
+                        sum_rate += rate
+                        sum_rate_sq += rate.square()
+                    rate_mean = sum_rate / float(n_mc)
+                    var_rate = torch.clamp(
+                        sum_rate_sq / float(n_mc) - rate_mean.square(), min=0.0
+                    )
+                    results["rate"][row_slice] = rate_mean.cpu().numpy()
+                    results["var_y"][row_slice] = (rate_mean + var_rate).cpu().numpy()
 
-            mu_pred = sum_mu / float(n_mc)
-            Ey2 = sum_m2_plus_var / float(n_mc)
-            var_pred = Ey2 - mu_pred ** 2
-            var_pred = torch.clamp(var_pred, min=1e-8)
-            sigma_pred = torch.sqrt(var_pred)
+                elif self.outcome_type == "neg_binomial":
+                    sum_mu = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    sum_y2 = torch.zeros((batch_n, self.y_dim), device=self.device)
+                    for _ in range(n_mc):
+                        out = self.model.decode(
+                            x_tensor,
+                            torch.randn((batch_n, self.latent_dim), device=self.device),
+                        )
+                        mu = F.softplus(out["raw_mu"]) + 1e-8
+                        r = F.softplus(out["raw_r"]) + 1e-8
+                        sum_mu += mu
+                        sum_y2 += mu + mu.square() / r + mu.square()
+                    mu_pred = sum_mu / float(n_mc)
+                    var_pred = torch.clamp(
+                        sum_y2 / float(n_mc) - mu_pred.square(), min=1e-8
+                    )
+                    results["mu"][row_slice] = mu_pred.cpu().numpy()
+                    results["var_y"][row_slice] = var_pred.cpu().numpy()
 
-            return {
-                "mu": mu_pred.cpu().numpy(),
-                "sigma": sigma_pred.cpu().numpy(),
-            }
-
-        elif self.outcome_type == "poisson":
-            # mixture of Poissons; E[Y] = E[lambda], Var[Y] = E[lambda] + Var[lambda]
-            sum_rate = torch.zeros((n, self.y_dim), device=self.device)
-            sum_rate_sq = torch.zeros((n, self.y_dim), device=self.device)
-
-            for out in outs:
-                log_rate = out["log_rate"]
-                rate = torch.exp(log_rate)
-                sum_rate += rate
-                sum_rate_sq += rate ** 2
-
-            lambda_mean = sum_rate / float(n_mc)
-            Ey_lambda2 = sum_rate_sq / float(n_mc)
-            var_lambda = Ey_lambda2 - lambda_mean ** 2
-            var_lambda = torch.clamp(var_lambda, min=0.0)
-            var_y = lambda_mean + var_lambda
-
-            return {
-                "rate": lambda_mean.cpu().numpy(),
-                "var_y": var_y.cpu().numpy(),
-            }
-
-        elif self.outcome_type == "neg_binomial":
-            # mixture over NB components; we track mean and Var(Y)
-            sum_mu = torch.zeros((n, self.y_dim), device=self.device)
-            sum_Ey2 = torch.zeros((n, self.y_dim), device=self.device)
-
-            for out in outs:
-                raw_mu = out["raw_mu"]
-                raw_r = out["raw_r"]
-                mu = F.softplus(raw_mu) + 1e-8
-                r = F.softplus(raw_r) + 1e-8
-
-                var_y = mu + mu**2 / r
-                sum_mu  += mu
-                sum_Ey2 += var_y + mu**2  # E[Y^2] = Var(Y) + (E[Y])^2
-
-            mu_pred = sum_mu / float(n_mc)
-            Ey2 = sum_Ey2 / float(n_mc)
-            var_pred = Ey2 - mu_pred**2
-            var_pred = torch.clamp(var_pred, min=1e-8)
-
-            return {
-                "mu": mu_pred.cpu().numpy(),
-                "var_y": var_pred.cpu().numpy(),
-            }
-
-        else:
-            raise ValueError("Invalid outcome_type.")
+        return results
 
     # --------- prediction: mean / expectation ---------
     def predict_mean(
         self,
         X: np.ndarray,
         n_mc: int = 20,
+        inference_batch_size: Optional[int] = None,
     ) -> np.ndarray:
         """
         Predict E[Y | X].
@@ -840,7 +1014,9 @@ class CVAETrainer:
         - poisson:  predictive mean (rate)
         - neg_binomial: predictive mean
         """
-        params = self.predict_params(X, n_mc=n_mc)
+        params = self.predict_params(
+            X, n_mc=n_mc, inference_batch_size=inference_batch_size
+        )
         if self.outcome_type == "bernoulli":
             return params["probs"]
         elif self.outcome_type == "gaussian":
@@ -856,6 +1032,7 @@ class CVAETrainer:
         self,
         X: np.ndarray,
         n_mc: int = 20,
+        inference_batch_size: Optional[int] = None,
     ) -> np.ndarray:
         """
         For backward compatibility: only valid for Bernoulli outcomes.
@@ -867,10 +1044,12 @@ class CVAETrainer:
                 "predict_proba() is only defined for outcome_type='bernoulli'. "
                 "Use predict_mean() or predict_params() for gaussian/poisson/neg_binomial."
             )
-        params = self.predict_params(X, n_mc=n_mc)
+        params = self.predict_params(
+            X, n_mc=n_mc, inference_batch_size=inference_batch_size
+        )
         return params["probs"]
 
-    def evaluate_loglik(
+    def evaluate_marginal_log_score(
         self,
         X: np.ndarray,
         Y: np.ndarray,
@@ -879,9 +1058,11 @@ class CVAETrainer:
         Y_mask: Optional[np.ndarray] = None,
     ) -> Dict[str, float]:
         """
-        Log-likelihood-style evaluation for Bernoulli outcomes.
+        Marginal composite log score for Bernoulli outcomes.
 
-        For outcome_type != 'bernoulli', this is currently not implemented.
+        This averages each outcome probability over the latent prior and then
+        scores outcomes independently. It is not the joint log-likelihood of
+        the full outcome vector.
         """
         if self.outcome_type != "bernoulli":
             raise NotImplementedError(
@@ -915,12 +1096,32 @@ class CVAETrainer:
             "avg_bce": avg_bce,
         }
 
+    def evaluate_loglik(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        n_mc: int = 20,
+        eps: float = 1e-7,
+        Y_mask: Optional[np.ndarray] = None,
+    ) -> Dict[str, float]:
+        """Deprecated alias for :meth:`evaluate_marginal_log_score`."""
+        warnings.warn(
+            "evaluate_loglik() computes a marginal composite score, not a joint "
+            "log-likelihood; use evaluate_marginal_log_score().",
+            FutureWarning,
+            stacklevel=2,
+        )
+        return self.evaluate_marginal_log_score(
+            X=X, Y=Y, n_mc=n_mc, eps=eps, Y_mask=Y_mask
+        )
+
     # --------- generation ---------
     def generate(
         self,
         X_new: np.ndarray,
         n_samples_per_x: int = 1,
         return_probs: bool = False,
+        inference_batch_size: Optional[int] = None,
     ) -> np.ndarray:
         """
         Generate samples from p(Y | X).
@@ -938,16 +1139,22 @@ class CVAETrainer:
             - return_probs=True : predictive means
             - return_probs=False: NB samples
         """
-        assert self.trained, "Model must be trained first."
+        if not self.trained:
+            raise RuntimeError("Model must be trained before generation.")
+        if not isinstance(n_samples_per_x, (int, np.integer)) or n_samples_per_x < 1:
+            raise ValueError("n_samples_per_x must be a positive integer.")
 
-        X_new = np.asarray(X_new, dtype=np.float32)
+        X_new = self._validate_matrix(X_new, "X", self.x_dim)
         X_std = self._standardize(X_new)
         n, x_dim = X_std.shape
-        assert x_dim == self.x_dim
 
         # When return_probs=True, use predict_params() to get distribution params
         if return_probs:
-            params = self.predict_params(X_new, n_mc=max(n_samples_per_x, 10))
+            params = self.predict_params(
+                X_new,
+                n_mc=max(n_samples_per_x, 10),
+                inference_batch_size=inference_batch_size,
+            )
             if self.outcome_type == "bernoulli":
                 return params["probs"]
             elif self.outcome_type == "gaussian":
@@ -959,55 +1166,52 @@ class CVAETrainer:
             else:
                 raise ValueError("Invalid outcome_type.")
 
-        # return_probs=False: sample from predictive distribution (1 draw per z)
+        if n_samples_per_x == 1:
+            output_shape = (n, self.y_dim)
+        else:
+            output_shape = (n, n_samples_per_x, self.y_dim)
+        output_dtype = np.float32 if self.outcome_type == "gaussian" else np.int32
+        samples = np.empty(output_shape, dtype=output_dtype)
+
         self.model.eval()
         with torch.no_grad():
-            x_tensor = torch.from_numpy(X_std).to(self.device)
+            for row_slice in self._inference_slices(n, inference_batch_size):
+                x_tensor = torch.from_numpy(X_std[row_slice]).to(self.device)
+                batch_n = x_tensor.shape[0]
+                total = batch_n * n_samples_per_x
+                x_rep = x_tensor.repeat_interleave(n_samples_per_x, dim=0)
+                z = torch.randn((total, self.latent_dim), device=self.device)
+                out = self.model.decode(x_rep, z)
 
-            total = n * n_samples_per_x
-            x_rep = x_tensor.repeat_interleave(n_samples_per_x, dim=0)
-            z = torch.randn((total, self.latent_dim), device=self.device)
-            out = self.model.decode(x_rep, z)
+                if self.outcome_type == "bernoulli":
+                    distribution = torch.distributions.Bernoulli(
+                        probs=torch.sigmoid(out["logits"])
+                    )
+                elif self.outcome_type == "gaussian":
+                    distribution = torch.distributions.Normal(
+                        loc=out["mu"], scale=torch.exp(0.5 * out["logvar"])
+                    )
+                elif self.outcome_type == "poisson":
+                    distribution = torch.distributions.Poisson(torch.exp(out["log_rate"]))
+                elif self.outcome_type == "neg_binomial":
+                    mu = F.softplus(out["raw_mu"]) + 1e-8
+                    r = F.softplus(out["raw_r"]) + 1e-8
+                    p = torch.clamp(r / (r + mu), min=1e-6, max=1.0 - 1e-6)
+                    distribution = torch.distributions.NegativeBinomial(
+                        total_count=r, probs=p
+                    )
+                else:
+                    raise ValueError("Invalid outcome_type.")
 
-            if self.outcome_type == "bernoulli":
-                logits = out["logits"]
-                probs = torch.sigmoid(logits)
-                bern = torch.distributions.Bernoulli(probs=probs)
-                y_samples = bern.sample().cpu().numpy().astype(np.int32)
+                batch_samples = distribution.sample().cpu().numpy().astype(output_dtype)
+                if n_samples_per_x == 1:
+                    samples[row_slice] = batch_samples.reshape(batch_n, self.y_dim)
+                else:
+                    samples[row_slice] = batch_samples.reshape(
+                        batch_n, n_samples_per_x, self.y_dim
+                    )
 
-            elif self.outcome_type == "gaussian":
-                mu = out["mu"]
-                logvar = out["logvar"]
-                std = torch.exp(0.5 * logvar)
-                normal = torch.distributions.Normal(loc=mu, scale=std)
-                y_samples = normal.sample().cpu().numpy().astype(np.float32)
-
-            elif self.outcome_type == "poisson":
-                log_rate = out["log_rate"]
-                rate = torch.exp(log_rate)
-                pois = torch.distributions.Poisson(rate)
-                y_samples = pois.sample().cpu().numpy().astype(np.int32)
-
-            elif self.outcome_type == "neg_binomial":
-                raw_mu = out["raw_mu"]
-                raw_r = out["raw_r"]
-                mu = F.softplus(raw_mu) + 1e-8
-                r = F.softplus(raw_r) + 1e-8
-
-                # NB parameterization: total_count = r, probability p = r / (r + mu)
-                p = r / (r + mu)
-                p = torch.clamp(p, min=1e-6, max=1.0 - 1e-6)
-
-                nb = torch.distributions.NegativeBinomial(total_count=r, probs=p)
-                y_samples = nb.sample().cpu().numpy().astype(np.int32)
-
-            else:
-                raise ValueError("Invalid outcome_type.")
-
-            if n_samples_per_x == 1:
-                return y_samples.reshape(n, self.y_dim)
-            else:
-                return y_samples.reshape(n, n_samples_per_x, self.y_dim)
+        return samples
 
 
 # ---------------------------------------------------------------------------

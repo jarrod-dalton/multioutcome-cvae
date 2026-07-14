@@ -23,5 +23,6 @@ def test_trainer_forward_shapes():
         hidden_dim=16
     )
     X = np.random.randn(5,4).astype(np.float32)
+    tr._fit_standardizer(X)
     logits = tr._forward_logits(tr._standardize(X))
     assert logits.shape == (5,3)
