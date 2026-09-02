@@ -23,6 +23,10 @@ def _r_strings(values: Optional[Sequence[str]]) -> str:
     return "c(" + ", ".join(_r_string(value) for value in values) + ")"
 
 
+def _r_int_vector(values: Sequence[int]) -> str:
+    return "c(" + ", ".join(f"{int(value)}L" for value in values) + ")"
+
+
 def _linear_spec(layer: nn.Linear) -> str:
     weight = layer.weight.detach().cpu().numpy().T
     bias = layer.bias.detach().cpu().numpy()
@@ -216,6 +220,325 @@ cvae_simulate <- function(X, n_samples_per_x = 1L, seed = NULL,
     }}
   }}
   if (n_samples_per_x == 1L) colnames(result) <- .multioutcome_cvae_model$outcome_names
+  result
+}}
+'''
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(source, encoding="utf-8")
+    return output_path
+
+
+def export_categorical_r(
+    trainer: CVAETrainer,
+    output_path: Union[str, Path],
+    feature_names: Optional[Sequence[str]] = None,
+) -> Path:
+    """Export a fitted categorical decoder as dependency-free base R source.
+
+    The generated file contains both model parameters and inference helpers. Category
+    values returned by ``cvae_simulate()`` are zero-based integer codes whose labels
+    are defined by the embedded outcome schema.
+    """
+    if not isinstance(trainer, CVAETrainer):
+        raise TypeError("trainer must be a CVAETrainer instance.")
+    if trainer.outcome_type != "categorical":
+        raise ValueError("Standalone categorical R export supports categorical models only.")
+    if not trainer.trained or trainer.x_mean is None or trainer.x_std is None:
+        raise RuntimeError("The trainer must be fitted before export.")
+
+    feature_names = _validate_names(feature_names, trainer.x_dim, "feature_names")
+
+    schema = getattr(trainer, "outcome_schema", None)
+    slices = getattr(trainer, "outcome_slices", None)
+    encoded_y_dim = getattr(trainer, "encoded_y_dim", None)
+    if not isinstance(schema, (list, tuple)) or len(schema) != trainer.y_dim:
+        raise ValueError("The categorical outcome schema is missing or inconsistent.")
+
+    normalized_schema = []
+    expected_slices = []
+    offset = 0
+    for entry in schema:
+        if not isinstance(entry, dict) or set(entry) != {"name", "levels"}:
+            raise ValueError("Each categorical schema entry must contain name and levels.")
+        name = entry["name"]
+        levels = entry["levels"]
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(levels, (list, tuple))
+        ):
+            raise ValueError("The categorical outcome schema is malformed.")
+        if (
+            len(levels) < 2
+            or any(
+                not isinstance(level, str) or not level.strip() for level in levels
+            )
+            or len(set(levels)) != len(levels)
+        ):
+            raise ValueError("Categorical levels must be unique non-empty strings.")
+        normalized_schema.append({"name": name, "levels": list(levels)})
+        expected_slices.append((offset, offset + len(levels)))
+        offset += len(levels)
+
+    outcome_names = [entry["name"] for entry in normalized_schema]
+    if len(set(outcome_names)) != len(outcome_names):
+        raise ValueError("Categorical outcome names must be unique.")
+    try:
+        normalized_slices = [tuple(int(value) for value in pair) for pair in slices]
+    except (TypeError, ValueError):
+        raise ValueError("Categorical outcome slices are missing or malformed.") from None
+    if normalized_slices != expected_slices or encoded_y_dim != offset:
+        raise ValueError("Categorical encoded dimensions or outcome slices are inconsistent.")
+
+    x_mean = np.asarray(trainer.x_mean)
+    x_std = np.asarray(trainer.x_std)
+    if (
+        x_mean.shape != (trainer.x_dim,)
+        or x_std.shape != (trainer.x_dim,)
+        or not np.isfinite(x_mean).all()
+        or not np.isfinite(x_std).all()
+        or np.any(x_std <= 0)
+    ):
+        raise ValueError("The fitted X standardizer is invalid.")
+
+    model = trainer.model
+    if (
+        getattr(model, "outcome_schema", None) != normalized_schema
+        or getattr(model, "outcome_slices", None) != expected_slices
+        or getattr(model, "encoded_y_dim", None) != offset
+    ):
+        raise ValueError(
+            "The categorical model metadata does not match the fitted trainer."
+        )
+    decoder_layers = ",\n    ".join(_linear_spec(layer) for layer in model.dec_layers)
+    head = getattr(model, "dec_logits_head", None)
+    skip = getattr(model, "dec_logits_skip", None)
+    if head is None or skip is None or not isinstance(skip, nn.Linear):
+        raise ValueError("Unsupported categorical decoder architecture.")
+    head_layers = [layer for layer in head if isinstance(layer, nn.Linear)]
+    if len(head_layers) != 2:
+        raise ValueError("Unsupported categorical decoder head architecture.")
+    if head_layers[-1].out_features != offset or skip.out_features != offset:
+        raise ValueError("Categorical decoder width does not match the outcome schema.")
+
+    schema_source = ",\n    ".join(
+        "list(name = "
+        + _r_string(entry["name"])
+        + ", levels = "
+        + _r_strings(entry["levels"])
+        + ")"
+        for entry in normalized_schema
+    )
+    flat_slices = [value for pair in expected_slices for value in pair]
+    slices_source = (
+        "matrix("
+        + _r_int_vector(flat_slices)
+        + f", nrow = {trainer.y_dim}L, ncol = 2L, byrow = TRUE, "
+        + "dimnames = list("
+        + _r_strings(outcome_names)
+        + ', c("start", "stop")))'
+    )
+
+    source = f'''# Generated by multioutcome_cvae. This file requires base R only.
+.multioutcome_cvae_model <- list(
+  format_version = 2L,
+  outcome_type = "categorical",
+  x_dim = {trainer.x_dim}L,
+  y_dim = {trainer.y_dim}L,
+  encoded_y_dim = {offset}L,
+  latent_dim = {trainer.latent_dim}L,
+  feature_names = {_r_strings(feature_names)},
+  outcome_schema = list(
+    {schema_source}
+  ),
+  outcome_slices = {slices_source},
+  x_mean = {_r_vector(x_mean)},
+  x_std = {_r_vector(x_std)},
+  decoder_layers = list(
+    {decoder_layers}
+  ),
+  head_layers = list(
+    {_linear_spec(head_layers[0])},
+    {_linear_spec(head_layers[1])}
+  ),
+  skip_layer = {_linear_spec(skip)}
+)
+
+.cvae_add_bias <- function(value, bias) {{
+  sweep(value, 2L, bias, FUN = "+")
+}}
+
+.cvae_positive_integer <- function(value, name) {{
+  if (length(value) != 1L || !is.numeric(value) || !is.finite(value) ||
+      value < 1 || value != floor(value) || value > .Machine$integer.max) {{
+    stop(sprintf("%s must be a positive integer.", name), call. = FALSE)
+  }}
+  as.integer(value)
+}}
+
+.cvae_validate_x <- function(X) {{
+  if (!is.matrix(X) && !is.data.frame(X)) {{
+    stop("X must be a numeric matrix or data frame.", call. = FALSE)
+  }}
+  X <- as.matrix(X)
+  if (!is.numeric(X)) stop("X must be numeric.", call. = FALSE)
+  if (nrow(X) < 1L || ncol(X) != .multioutcome_cvae_model$x_dim) {{
+    stop(sprintf("X must have at least one row and exactly %d columns.",
+                 .multioutcome_cvae_model$x_dim), call. = FALSE)
+  }}
+  expected <- .multioutcome_cvae_model$feature_names
+  if (!is.null(expected) && !is.null(colnames(X))) {{
+    missing_names <- setdiff(expected, colnames(X))
+    if (length(missing_names)) {{
+      stop(paste("X is missing required features:", paste(missing_names, collapse = ", ")),
+           call. = FALSE)
+    }}
+    X <- X[, expected, drop = FALSE]
+  }}
+  storage.mode(X) <- "double"
+  if (any(!is.finite(X))) stop("X must contain only finite values.", call. = FALSE)
+  X
+}}
+
+.cvae_standardize_x <- function(X) {{
+  X <- .cvae_validate_x(X)
+  sweep(sweep(X, 2L, .multioutcome_cvae_model$x_mean, FUN = "-"),
+        2L, .multioutcome_cvae_model$x_std, FUN = "/")
+}}
+
+.cvae_softmax <- function(logits) {{
+  maxima <- apply(logits, 1L, max)
+  shifted <- sweep(logits, 1L, maxima, FUN = "-")
+  exponentiated <- exp(shifted)
+  sweep(exponentiated, 1L, rowSums(exponentiated), FUN = "/")
+}}
+
+cvae_model_metadata <- function() {{
+  model <- .multioutcome_cvae_model
+  list(
+    format_version = model$format_version,
+    outcome_type = model$outcome_type,
+    x_dim = model$x_dim,
+    y_dim = model$y_dim,
+    encoded_y_dim = model$encoded_y_dim,
+    latent_dim = model$latent_dim,
+    feature_names = model$feature_names,
+    outcome_schema = model$outcome_schema,
+    outcome_slices = model$outcome_slices
+  )
+}}
+
+cvae_decoder_probabilities <- function(X, Z) {{
+  X_std <- .cvae_standardize_x(X)
+  Z <- as.matrix(Z)
+  if (!is.numeric(Z) || nrow(Z) != nrow(X_std) ||
+      ncol(Z) != .multioutcome_cvae_model$latent_dim || any(!is.finite(Z))) {{
+    stop(sprintf("Z must be a finite numeric matrix with %d rows and %d columns.",
+                 nrow(X_std), .multioutcome_cvae_model$latent_dim), call. = FALSE)
+  }}
+  storage.mode(Z) <- "double"
+
+  hidden <- cbind(X_std, Z)
+  for (layer in .multioutcome_cvae_model$decoder_layers) {{
+    hidden <- pmax(.cvae_add_bias(hidden %*% layer$weight, layer$bias), 0)
+  }}
+  head <- .multioutcome_cvae_model$head_layers
+  core <- pmax(.cvae_add_bias(hidden %*% head[[1L]]$weight, head[[1L]]$bias), 0)
+  core <- .cvae_add_bias(core %*% head[[2L]]$weight, head[[2L]]$bias)
+  skip <- .cvae_add_bias(
+    X_std %*% .multioutcome_cvae_model$skip_layer$weight,
+    .multioutcome_cvae_model$skip_layer$bias
+  )
+  logits <- core + skip
+
+  result <- vector("list", .multioutcome_cvae_model$y_dim)
+  names(result) <- vapply(.multioutcome_cvae_model$outcome_schema,
+                          function(entry) entry$name, character(1L))
+  for (outcome in seq_len(.multioutcome_cvae_model$y_dim)) {{
+    slice <- .multioutcome_cvae_model$outcome_slices[outcome, ]
+    columns <- seq.int(slice[["start"]] + 1L, slice[["stop"]])
+    probabilities <- .cvae_softmax(logits[, columns, drop = FALSE])
+    colnames(probabilities) <- .multioutcome_cvae_model$outcome_schema[[outcome]]$levels
+    rownames(probabilities) <- rownames(X_std)
+    result[[outcome]] <- probabilities
+  }}
+  result
+}}
+
+cvae_marginal_probabilities <- function(X, n_mc = 20L, seed = NULL,
+                                        decoder_batch_size = 10000L) {{
+  X <- .cvae_validate_x(X)
+  n_mc <- .cvae_positive_integer(n_mc, "n_mc")
+  decoder_batch_size <- .cvae_positive_integer(decoder_batch_size, "decoder_batch_size")
+  if (!is.null(seed)) set.seed(seed)
+
+  result <- lapply(.multioutcome_cvae_model$outcome_schema, function(entry) {{
+    matrix(0, nrow(X), length(entry$levels),
+           dimnames = list(rownames(X), entry$levels))
+  }})
+  names(result) <- vapply(.multioutcome_cvae_model$outcome_schema,
+                          function(entry) entry$name, character(1L))
+
+  total <- nrow(X) * n_mc
+  for (start in seq.int(1, total, by = decoder_batch_size)) {{
+    finish <- min(start + decoder_batch_size - 1, total)
+    expanded <- seq.int(start, finish)
+    row_ids <- as.integer((expanded - 1) %/% n_mc + 1)
+    Z <- matrix(rnorm(length(expanded) * .multioutcome_cvae_model$latent_dim),
+                nrow = length(expanded))
+    probabilities <- cvae_decoder_probabilities(X[row_ids, , drop = FALSE], Z)
+    unique_rows <- unique(row_ids)
+    for (outcome in seq_len(.multioutcome_cvae_model$y_dim)) {{
+      grouped <- rowsum(probabilities[[outcome]], row_ids, reorder = FALSE)
+      result[[outcome]][unique_rows, ] <- result[[outcome]][unique_rows, , drop = FALSE] + grouped
+    }}
+  }}
+  lapply(result, function(probabilities) probabilities / n_mc)
+}}
+
+cvae_simulate <- function(X, n_samples_per_x = 1L, seed = NULL,
+                          decoder_batch_size = 10000L) {{
+  X <- .cvae_validate_x(X)
+  n_samples_per_x <- .cvae_positive_integer(n_samples_per_x, "n_samples_per_x")
+  decoder_batch_size <- .cvae_positive_integer(decoder_batch_size, "decoder_batch_size")
+  if (!is.null(seed)) set.seed(seed)
+
+  total <- nrow(X) * n_samples_per_x
+  draws <- matrix(0L, total, .multioutcome_cvae_model$y_dim)
+  for (start in seq.int(1, total, by = decoder_batch_size)) {{
+    finish <- min(start + decoder_batch_size - 1, total)
+    expanded <- seq.int(start, finish)
+    row_ids <- as.integer((expanded - 1) %/% n_samples_per_x + 1)
+    Z <- matrix(rnorm(length(expanded) * .multioutcome_cvae_model$latent_dim),
+                nrow = length(expanded))
+    probabilities <- cvae_decoder_probabilities(X[row_ids, , drop = FALSE], Z)
+    uniforms <- matrix(runif(length(expanded) * .multioutcome_cvae_model$y_dim),
+                       nrow = length(expanded))
+    chunk <- matrix(0L, length(expanded), .multioutcome_cvae_model$y_dim)
+    for (outcome in seq_len(.multioutcome_cvae_model$y_dim)) {{
+      cumulative <- t(apply(probabilities[[outcome]], 1L, cumsum))
+      thresholds <- cumulative[, seq_len(ncol(cumulative) - 1L), drop = FALSE]
+      chunk[, outcome] <- as.integer(rowSums(uniforms[, outcome] > thresholds))
+    }}
+    draws[expanded, ] <- chunk
+  }}
+
+  outcome_names <- vapply(.multioutcome_cvae_model$outcome_schema,
+                           function(entry) entry$name, character(1L))
+  if (n_samples_per_x == 1L) {{
+    rownames(draws) <- rownames(X)
+    colnames(draws) <- outcome_names
+    return(draws)
+  }}
+  result <- aperm(
+    array(t(draws),
+          dim = c(.multioutcome_cvae_model$y_dim, n_samples_per_x, nrow(X))),
+    c(3L, 2L, 1L)
+  )
+  dimnames(result) <- list(rownames(X), NULL, outcome_names)
+  names(dimnames(result)) <- c("row", "sample", "outcome")
   result
 }}
 '''

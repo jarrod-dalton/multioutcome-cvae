@@ -10,8 +10,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.special import gammaln  # PyTorch >= 1.8
 
 # ---------------------------------------------------------------------------
-# Currently supported are "bernoulli" (binary Y), "gaussian" (normal Y).
-# and "poisson" (count Y).
+# Production-supported outcomes are "bernoulli" (binary Y), "categorical"
+# (mixed-cardinality nominal Y), and "gaussian" (normal Y). "poisson"
+# (count Y) remains available for compatibility but is deprecated.
 #
 # In experimentation, the CVAE performed reasonably well for generated 
 # binary and continuous data. The Poisson model estimated conditional
@@ -24,7 +25,7 @@ from torch.special import gammaln  # PyTorch >= 1.8
 # ---------------------------------------------------------------------------
 
 # Production-supported outcome families
-PRODUCTION_OUTCOME_TYPES = ("bernoulli", "gaussian")
+PRODUCTION_OUTCOME_TYPES = ("bernoulli", "gaussian", "categorical")
 
 # Retained for compatibility, without a production guarantee
 DEPRECATED_OUTCOME_TYPES = ("poisson",)
@@ -33,6 +34,82 @@ VALID_OUTCOME_TYPES = PRODUCTION_OUTCOME_TYPES + DEPRECATED_OUTCOME_TYPES
 
 # Experimental / unstable:
 EXPERIMENTAL_OUTCOME_TYPES = ("neg_binomial",)
+
+
+def _normalize_outcome_schema(
+    outcome_type: str,
+    y_dim: int,
+    outcome_schema: Optional[List[Dict[str, Any]]],
+):
+    """Validate categorical metadata and derive its flat decoder layout."""
+    if outcome_type != "categorical":
+        if outcome_schema is not None:
+            raise ValueError(
+                "outcome_schema is only valid for outcome_type='categorical'."
+            )
+        return None, y_dim, []
+
+    if outcome_schema is None:
+        raise ValueError(
+            "outcome_schema is required for outcome_type='categorical'."
+        )
+    if not isinstance(outcome_schema, (list, tuple)):
+        raise ValueError("outcome_schema must be a list of outcome dictionaries.")
+    if len(outcome_schema) != y_dim:
+        raise ValueError(
+            "outcome_schema must contain exactly one entry per semantic "
+            f"outcome ({y_dim}); received {len(outcome_schema)}."
+        )
+
+    normalized = []
+    names = set()
+    slices = []
+    start = 0
+    for index, entry in enumerate(outcome_schema):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"outcome_schema[{index}] must be a dictionary with name and levels."
+            )
+
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"outcome_schema[{index}].name must be a non-empty string."
+            )
+        if name in names:
+            raise ValueError(f"Duplicate outcome name in outcome_schema: {name!r}.")
+        names.add(name)
+
+        levels = entry.get("levels")
+        if not isinstance(levels, (list, tuple)):
+            raise ValueError(
+                f"outcome_schema[{index}].levels must be a list of strings."
+            )
+        if len(levels) < 2:
+            raise ValueError(
+                f"Outcome {name!r} must define at least two levels."
+            )
+        normalized_levels = []
+        seen_levels = set()
+        for level_index, level in enumerate(levels):
+            if not isinstance(level, str) or not level.strip():
+                raise ValueError(
+                    f"outcome_schema[{index}].levels[{level_index}] must be "
+                    "a non-empty string."
+                )
+            if level in seen_levels:
+                raise ValueError(
+                    f"Outcome {name!r} contains duplicate level {level!r}."
+                )
+            seen_levels.add(level)
+            normalized_levels.append(level)
+
+        stop = start + len(normalized_levels)
+        normalized.append({"name": name, "levels": normalized_levels})
+        slices.append((start, stop))
+        start = stop
+
+    return normalized, start, slices
 
 # ---------------------------------------------------------------------------
 # Log-likelihood helper functions (used in tests and potentially by users)
@@ -210,7 +287,8 @@ class MultivariateOutcomeCVAE(nn.Module):
     """
     Conditional VAE for multivariate outcomes with selectable family:
 
-      outcome_type ∈ {"bernoulli", "gaussian", "poisson", "neg_binomial"}
+      outcome_type ∈ {"bernoulli", "gaussian", "categorical", "poisson",
+      "neg_binomial"}
 
     Encoder: q(z | x, y)
     Decoder: p(y | x, z)
@@ -225,6 +303,7 @@ class MultivariateOutcomeCVAE(nn.Module):
         outcome_type: str = "bernoulli",
         enc_hidden_dims: Optional[List[int]] = None,
         dec_hidden_dims: Optional[List[int]] = None,
+        outcome_schema: Optional[List[Dict[str, Any]]] = None,
     ):
         super().__init__()
         assert outcome_type in VALID_OUTCOME_TYPES, \
@@ -239,6 +318,11 @@ class MultivariateOutcomeCVAE(nn.Module):
         self.y_dim = y_dim
         self.latent_dim = latent_dim
         self.outcome_type = outcome_type
+        (
+            self.outcome_schema,
+            self.encoded_y_dim,
+            self.outcome_slices,
+        ) = _normalize_outcome_schema(outcome_type, y_dim, outcome_schema)
 
         if enc_hidden_dims is None or len(enc_hidden_dims) == 0:
             enc_hidden_dims = [64, 64]
@@ -249,7 +333,7 @@ class MultivariateOutcomeCVAE(nn.Module):
         self.dec_hidden_dims = dec_hidden_dims
 
         # ---------------- Encoder over [x, y] ----------------
-        enc_input_dim = x_dim + y_dim
+        enc_input_dim = x_dim + self.encoded_y_dim
         self.enc_layers = nn.ModuleList()
         in_dim = enc_input_dim
         for h_dim in enc_hidden_dims:
@@ -281,6 +365,15 @@ class MultivariateOutcomeCVAE(nn.Module):
                 nn.Linear(head_hidden, y_dim),
             )
             self.dec_logits_skip = nn.Linear(x_dim, y_dim)
+
+        elif outcome_type == "categorical":
+            # One contiguous logits block per semantic outcome.
+            self.dec_logits_head = nn.Sequential(
+                nn.Linear(dec_last_dim, head_hidden),
+                nn.ReLU(),
+                nn.Linear(head_hidden, self.encoded_y_dim),
+            )
+            self.dec_logits_skip = nn.Linear(x_dim, self.encoded_y_dim)
 
         elif outcome_type == "gaussian":
             # mu(x, z) = head_mu(h) + W_skip_mu x
@@ -324,8 +417,53 @@ class MultivariateOutcomeCVAE(nn.Module):
 
     # ---------------- Encode / reparameterize / decode ----------------
 
-    def encode(self, x: torch.Tensor, y: torch.Tensor):
-        h = torch.cat([x, y], dim=1)
+    def _encode_categorical_y(
+        self,
+        y: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if y.ndim != 2 or y.shape[1] != self.y_dim:
+            raise ValueError(
+                f"Categorical y must have shape (n, {self.y_dim})."
+            )
+        if not torch.isfinite(y).all():
+            raise ValueError("Categorical y must contain only finite values.")
+        if not torch.equal(y, torch.round(y)):
+            raise ValueError("Categorical y codes must be integers.")
+        if mask is not None:
+            if mask.shape != y.shape:
+                raise ValueError("Categorical mask must have the same shape as y.")
+            if not torch.isfinite(mask).all() or not torch.all(
+                (mask == 0) | (mask == 1)
+            ):
+                raise ValueError("Categorical mask values must be exactly 0 or 1.")
+
+        groups = []
+        for outcome_index, schema_entry in enumerate(self.outcome_schema):
+            cardinality = len(schema_entry["levels"])
+            codes = y[:, outcome_index].long()
+            if torch.any(codes < 0) or torch.any(codes >= cardinality):
+                raise ValueError(
+                    f"Categorical y codes for {schema_entry['name']!r} must be "
+                    f"between 0 and {cardinality - 1}."
+                )
+            group = F.one_hot(codes, num_classes=cardinality).to(dtype=y.dtype)
+            if mask is not None:
+                group = group * mask[:, outcome_index].unsqueeze(1).to(y.dtype)
+            groups.append(group)
+        return torch.cat(groups, dim=1)
+
+    def encode(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ):
+        if self.outcome_type == "categorical":
+            y_for_encoder = self._encode_categorical_y(y, mask=mask).to(x.dtype)
+        else:
+            y_for_encoder = y
+        h = torch.cat([x, y_for_encoder], dim=1)
         for layer in self.enc_layers:
             h = F.relu(layer(h))
         mu = self.enc_mu(h)
@@ -346,7 +484,7 @@ class MultivariateOutcomeCVAE(nn.Module):
         for layer in self.dec_layers:
             h = F.relu(layer(h))
 
-        if self.outcome_type == "bernoulli":
+        if self.outcome_type in ("bernoulli", "categorical"):
             logits_core = self.dec_logits_head(h)
             logits_skip = self.dec_logits_skip(x)
             logits = logits_core + logits_skip
@@ -381,14 +519,19 @@ class MultivariateOutcomeCVAE(nn.Module):
         else:
             raise ValueError("Invalid outcome_type.")
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ):
         """
         Encode -> reparameterize -> decode.
         Returns:
             out: decoder outputs (family-specific)
             mu_z, logvar_z: parameters of q(z | x, y)
         """
-        mu_z, logvar_z = self.encode(x, y)
+        mu_z, logvar_z = self.encode(x, y, mask=mask)
         z = self.reparameterize(mu_z, logvar_z)
         out = self.decode(x, z)
         return out, mu_z, logvar_z
@@ -422,6 +565,7 @@ class CVAETrainer:
         lr: float = 1e-3,
         beta_kl: float = 1.0,
         device: Optional[str] = None,
+        outcome_schema: Optional[List[Dict[str, Any]]] = None,
     ):
         if outcome_type not in VALID_OUTCOME_TYPES + EXPERIMENTAL_OUTCOME_TYPES:
             raise ValueError(
@@ -434,13 +578,19 @@ class CVAETrainer:
             raise NotImplementedError(
                 "Outcome type 'neg_binomial' is experimental and not yet "
                 "supported in the public API. This release only supports "
-                "outcome_type in {'bernoulli', 'gaussian', 'poisson'}."
+                "outcome_type in {'bernoulli', 'categorical', 'gaussian', "
+                "'poisson'}."
             )
         
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.latent_dim = latent_dim
         self.outcome_type = outcome_type
+        (
+            self.outcome_schema,
+            self.encoded_y_dim,
+            self.outcome_slices,
+        ) = _normalize_outcome_schema(outcome_type, y_dim, outcome_schema)
 
         if enc_hidden_dims is None:
             enc_hidden_dims = [hidden_dim] * n_hidden_layers
@@ -466,6 +616,7 @@ class CVAETrainer:
             outcome_type=outcome_type,
             enc_hidden_dims=enc_hidden_dims,
             dec_hidden_dims=dec_hidden_dims,
+            outcome_schema=self.outcome_schema,
         ).to(self.device)
 
         self.x_mean: Optional[np.ndarray] = None
@@ -498,10 +649,62 @@ class CVAETrainer:
         return array
 
     def _validate_outcomes(self, Y: np.ndarray, name: str) -> np.ndarray:
+        if self.outcome_type == "categorical":
+            # Validate in float64 before the training representation is narrowed
+            # to float32. Otherwise, sufficiently small fractional parts could
+            # round away and violate the integer-code contract unnoticed.
+            try:
+                categorical_y = np.asarray(Y, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be a numeric matrix.") from exc
+            if categorical_y.ndim != 2:
+                raise ValueError(f"{name} must be a two-dimensional matrix.")
+            if categorical_y.shape[0] == 0:
+                raise ValueError(f"{name} must contain at least one row.")
+            if categorical_y.shape[1] != self.y_dim:
+                raise ValueError(
+                    f"{name} must contain exactly {self.y_dim} columns; "
+                    f"received {categorical_y.shape[1]}."
+                )
+            if not np.isfinite(categorical_y).all():
+                raise ValueError(f"{name} must contain only finite values.")
+            if not np.equal(categorical_y, np.floor(categorical_y)).all():
+                raise ValueError("Categorical outcome codes must be integers.")
+            for outcome_index, schema_entry in enumerate(self.outcome_schema):
+                cardinality = len(schema_entry["levels"])
+                codes = categorical_y[:, outcome_index]
+                if np.any(codes < 0) or np.any(codes >= cardinality):
+                    raise ValueError(
+                        f"Categorical outcome codes for {schema_entry['name']!r} "
+                        f"must be between 0 and {cardinality - 1}."
+                    )
+            return categorical_y.astype(np.float32)
+
         Y = self._validate_matrix(Y, name, self.y_dim)
         if self.outcome_type == "bernoulli" and not np.isin(Y, (0.0, 1.0)).all():
             raise ValueError("Bernoulli outcomes must be exactly 0 or 1.")
         return Y
+
+    def _validate_categorical_mask(
+        self,
+        mask: Optional[np.ndarray],
+        name: str,
+        expected_rows: int,
+    ) -> Optional[np.ndarray]:
+        if mask is None or self.outcome_type != "categorical":
+            return mask
+        try:
+            array = np.asarray(mask, dtype=np.float32)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a numeric matrix.") from exc
+        if array.ndim != 2 or array.shape != (expected_rows, self.y_dim):
+            raise ValueError(
+                f"{name} must have shape ({expected_rows}, {self.y_dim}); "
+                f"received {array.shape}."
+            )
+        if not np.isfinite(array).all() or not np.isin(array, (0.0, 1.0)).all():
+            raise ValueError(f"{name} values must be finite and exactly 0 or 1.")
+        return array
 
     def _fit_standardizer(self, X_train: np.ndarray):
         mean = X_train.mean(axis=0)
@@ -558,6 +761,20 @@ class CVAETrainer:
                 return torch.sum(mask * (rate - y * log_rate))
             else:
                 return torch.sum(rate - y * log_rate)
+
+        elif self.outcome_type == "categorical":
+            logits = out["logits"]
+            loss = logits.new_zeros(())
+            for outcome_index, (start, stop) in enumerate(self.outcome_slices):
+                outcome_loss = F.cross_entropy(
+                    logits[:, start:stop],
+                    y[:, outcome_index].long(),
+                    reduction="none",
+                )
+                if mask is not None:
+                    outcome_loss = outcome_loss * mask[:, outcome_index]
+                loss = loss + outcome_loss.sum()
+            return loss
 
         elif self.outcome_type == "neg_binomial":
             raw_mu = out["raw_mu"]
@@ -635,6 +852,9 @@ class CVAETrainer:
         Y_train = self._validate_outcomes(Y_train, "Y_train")
         if X_train.shape[0] != Y_train.shape[0]:
             raise ValueError("X and Y_train must contain the same number of rows.")
+        Y_mask_train = self._validate_categorical_mask(
+            Y_mask_train, "Y_mask_train", X_train.shape[0]
+        )
 
         if (X_val is None) != (Y_val is None):
             raise ValueError("X_val and Y_val must either both be provided or both be None.")
@@ -643,6 +863,9 @@ class CVAETrainer:
             Y_val = self._validate_outcomes(Y_val, "Y_val")
             if X_val.shape[0] != Y_val.shape[0]:
                 raise ValueError("X_val and Y_val must contain the same number of rows.")
+            Y_mask_val = self._validate_categorical_mask(
+                Y_mask_val, "Y_mask_val", X_val.shape[0]
+            )
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -711,7 +934,7 @@ class CVAETrainer:
                     mb = mb.to(self.device)
 
                 optimizer.zero_grad()
-                out, mu_z, logvar_z = self.model(xb, yb)
+                out, mu_z, logvar_z = self.model(xb, yb, mask=mb)
 
                 recon_loss = self._recon_loss(yb, out, mask=mb)
                 kl_loss = -0.5 * torch.sum(
@@ -791,7 +1014,7 @@ class CVAETrainer:
                             if mb is not None:
                                 mb = mb.to(self.device)
 
-                            out, mu_z, logvar_z = self.model(xb, yb)
+                            out, mu_z, logvar_z = self.model(xb, yb, mask=mb)
                             recon_loss = self._recon_loss(yb, out, mask=mb)
                             kl_loss = -0.5 * torch.sum(
                                 1 + logvar_z - mu_z.pow(2) - logvar_z.exp()
@@ -894,7 +1117,7 @@ class CVAETrainer:
         X: np.ndarray,
         n_mc: int = 20,
         inference_batch_size: Optional[int] = None,
-    ) -> Dict[str, np.ndarray]:
+    ) -> Dict[str, Any]:
         """
         Return predictive distribution parameters for Y | X.
 
@@ -908,6 +1131,9 @@ class CVAETrainer:
             {"rate": lambda_pred_ij, "var_y": var_y_pred_ij}
               where var_y approximates Var(Y_ij | X_i) under the mixture.
 
+        categorical:
+            {"probabilities": {outcome_name: p_ijk}}
+
         neg_binomial:
             {"mu": mu_pred_ij, "var_y": var_y_pred_ij}
         """
@@ -918,16 +1144,26 @@ class CVAETrainer:
         X = self._validate_matrix(X, "X", self.x_dim)
         X_std = self._standardize(X)
         n = X.shape[0]
-        result_keys = {
-            "bernoulli": ("probs",),
-            "gaussian": ("mu", "sigma"),
-            "poisson": ("rate", "var_y"),
-            "neg_binomial": ("mu", "var_y"),
-        }
-        results = {
-            key: np.empty((n, self.y_dim), dtype=np.float32)
-            for key in result_keys[self.outcome_type]
-        }
+        if self.outcome_type == "categorical":
+            results = {
+                "probabilities": {
+                    schema_entry["name"]: np.empty(
+                        (n, len(schema_entry["levels"])), dtype=np.float32
+                    )
+                    for schema_entry in self.outcome_schema
+                }
+            }
+        else:
+            result_keys = {
+                "bernoulli": ("probs",),
+                "gaussian": ("mu", "sigma"),
+                "poisson": ("rate", "var_y"),
+                "neg_binomial": ("mu", "var_y"),
+            }
+            results = {
+                key: np.empty((n, self.y_dim), dtype=np.float32)
+                for key in result_keys[self.outcome_type]
+            }
 
         self.model.eval()
         with torch.no_grad():
@@ -978,6 +1214,35 @@ class CVAETrainer:
                     results["rate"][row_slice] = rate_mean.cpu().numpy()
                     results["var_y"][row_slice] = (rate_mean + var_rate).cpu().numpy()
 
+                elif self.outcome_type == "categorical":
+                    probability_sums = [
+                        torch.zeros(
+                            (batch_n, stop - start), device=self.device
+                        )
+                        for start, stop in self.outcome_slices
+                    ]
+                    for _ in range(n_mc):
+                        logits = self.model.decode(
+                            x_tensor,
+                            torch.randn(
+                                (batch_n, self.latent_dim), device=self.device
+                            ),
+                        )["logits"]
+                        for outcome_index, (start, stop) in enumerate(
+                            self.outcome_slices
+                        ):
+                            probability_sums[outcome_index] += torch.softmax(
+                                logits[:, start:stop], dim=1
+                            )
+                    for outcome_index, schema_entry in enumerate(
+                        self.outcome_schema
+                    ):
+                        results["probabilities"][schema_entry["name"]][
+                            row_slice
+                        ] = (
+                            probability_sums[outcome_index] / float(n_mc)
+                        ).cpu().numpy()
+
                 elif self.outcome_type == "neg_binomial":
                     sum_mu = torch.zeros((batch_n, self.y_dim), device=self.device)
                     sum_y2 = torch.zeros((batch_n, self.y_dim), device=self.device)
@@ -1014,6 +1279,11 @@ class CVAETrainer:
         - poisson:  predictive mean (rate)
         - neg_binomial: predictive mean
         """
+        if self.outcome_type == "categorical":
+            raise ValueError(
+                "predict_mean() is not defined for nominal categorical outcomes; "
+                "use predict_params() to obtain named level probabilities."
+            )
         params = self.predict_params(
             X, n_mc=n_mc, inference_batch_size=inference_batch_size
         )
@@ -1042,7 +1312,8 @@ class CVAETrainer:
         if self.outcome_type != "bernoulli":
             raise ValueError(
                 "predict_proba() is only defined for outcome_type='bernoulli'. "
-                "Use predict_mean() or predict_params() for gaussian/poisson/neg_binomial."
+                "Use predict_params() for categorical models or predict_mean() "
+                "for other supported families."
             )
         params = self.predict_params(
             X, n_mc=n_mc, inference_batch_size=inference_batch_size
@@ -1122,7 +1393,8 @@ class CVAETrainer:
         n_samples_per_x: int = 1,
         return_probs: bool = False,
         inference_batch_size: Optional[int] = None,
-    ) -> np.ndarray:
+        decoder_batch_size: int = 10000,
+    ) -> Any:
         """
         Generate samples from p(Y | X).
 
@@ -1138,11 +1410,19 @@ class CVAETrainer:
         - neg_binomial:
             - return_probs=True : predictive means
             - return_probs=False: NB samples
+        - categorical:
+            - return_probs=True : named level-probability matrices
+            - return_probs=False: zero-based integer-coded samples
         """
         if not self.trained:
             raise RuntimeError("Model must be trained before generation.")
         if not isinstance(n_samples_per_x, (int, np.integer)) or n_samples_per_x < 1:
             raise ValueError("n_samples_per_x must be a positive integer.")
+        if self.outcome_type == "categorical" and (
+            not isinstance(decoder_batch_size, (int, np.integer))
+            or decoder_batch_size < 1
+        ):
+            raise ValueError("decoder_batch_size must be a positive integer.")
 
         X_new = self._validate_matrix(X_new, "X", self.x_dim)
         X_std = self._standardize(X_new)
@@ -1161,6 +1441,8 @@ class CVAETrainer:
                 return params["mu"]
             elif self.outcome_type == "poisson":
                 return params["rate"]
+            elif self.outcome_type == "categorical":
+                return params["probabilities"]
             elif self.outcome_type == "neg_binomial":
                 return params["mu"]
             else:
@@ -1179,6 +1461,49 @@ class CVAETrainer:
                 x_tensor = torch.from_numpy(X_std[row_slice]).to(self.device)
                 batch_n = x_tensor.shape[0]
                 total = batch_n * n_samples_per_x
+
+                if self.outcome_type == "categorical":
+                    # Write each bounded decoder chunk directly into the final
+                    # output buffer. This avoids materializing expanded X/Z/logit
+                    # tensors or a second full-size sample array.
+                    batch_samples = samples[row_slice].reshape(total, self.y_dim)
+                    for expanded_start in range(
+                        0, total, int(decoder_batch_size)
+                    ):
+                        expanded_stop = min(
+                            expanded_start + int(decoder_batch_size), total
+                        )
+                        row_indices = torch.div(
+                            torch.arange(
+                                expanded_start,
+                                expanded_stop,
+                                device=self.device,
+                            ),
+                            n_samples_per_x,
+                            rounding_mode="floor",
+                        )
+                        x_chunk = x_tensor.index_select(0, row_indices)
+                        z = torch.randn(
+                            (expanded_stop - expanded_start, self.latent_dim),
+                            device=self.device,
+                        )
+                        logits = self.model.decode(x_chunk, z)["logits"]
+                        for outcome_index, (start, stop) in enumerate(
+                            self.outcome_slices
+                        ):
+                            batch_samples[
+                                expanded_start:expanded_stop, outcome_index
+                            ] = (
+                                torch.distributions.Categorical(
+                                    logits=logits[:, start:stop]
+                                )
+                                .sample()
+                                .cpu()
+                                .numpy()
+                                .astype(np.int32)
+                            )
+                    continue
+
                 x_rep = x_tensor.repeat_interleave(n_samples_per_x, dim=0)
                 z = torch.randn((total, self.latent_dim), device=self.device)
                 out = self.model.decode(x_rep, z)
@@ -1232,6 +1557,7 @@ def tune_cvae_random_search(
     device: Optional[str] = None,
     base_seed: int = 1234,
     verbose: bool = True,
+    outcome_schema: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1263,6 +1589,7 @@ def tune_cvae_random_search(
             lr=cfg.get("lr", 1e-3),
             beta_kl=cfg.get("beta_kl", 1.0),
             device=device,
+            outcome_schema=outcome_schema,
         )
 
         if verbose:
@@ -1316,6 +1643,7 @@ def tune_cvae_tpe(
     device: Optional[str] = None,
     base_seed: int = 1234,
     verbose: bool = True,
+    outcome_schema: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     try:
         from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
@@ -1348,6 +1676,7 @@ def tune_cvae_tpe(
             lr=cfg.get("lr", 1e-3),
             beta_kl=cfg.get("beta_kl", 1.0),
             device=device,
+            outcome_schema=outcome_schema,
         )
 
         if verbose:
@@ -1417,6 +1746,7 @@ def fit_cvae_with_tuning(
     seed: int = 1234,
     device: Optional[str] = None,
     verbose: bool = True,
+    outcome_schema: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     One-shot convenience wrapper:
@@ -1427,7 +1757,13 @@ def fit_cvae_with_tuning(
       4. Return fitted trainer + tuning info
     """
     X = np.asarray(X, dtype=np.float32)
-    Y = np.asarray(Y, dtype=np.float32)
+    # Preserve categorical values until the trainer has verified that the
+    # original inputs are exact integer codes. Numeric families retain the
+    # historical float32 conversion.
+    if outcome_type == "categorical":
+        Y = np.asarray(Y)
+    else:
+        Y = np.asarray(Y, dtype=np.float32)
     assert X.shape[0] == Y.shape[0]
     n, x_dim = X.shape
     y_dim = Y.shape[1]
@@ -1456,6 +1792,7 @@ def fit_cvae_with_tuning(
             device=device,
             base_seed=seed,
             verbose=verbose,
+            outcome_schema=outcome_schema,
         )
     elif method.lower() == "tpe":
         tuning_results = tune_cvae_tpe(
@@ -1471,6 +1808,7 @@ def fit_cvae_with_tuning(
             device=device,
             base_seed=seed,
             verbose=verbose,
+            outcome_schema=outcome_schema,
         )
     else:
         raise ValueError("method must be 'random' or 'tpe'.")
@@ -1494,6 +1832,7 @@ def fit_cvae_with_tuning(
         lr=best_config.get("lr", 1e-3),
         beta_kl=best_config.get("beta_kl", 1.0),
         device=device,
+        outcome_schema=outcome_schema,
     )
 
     trainer.fit(

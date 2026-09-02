@@ -53,4 +53,4 @@ jobs:
           pip install ".[test]"
 
       - name: Run standalone R export parity tests
-        run: pytest -q tests/test_export_r.py
+        run: pytest -q tests/test_export_r.py tests/test_export_categorical_r.py

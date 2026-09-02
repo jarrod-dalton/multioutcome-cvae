@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multioutcome-cvae"             # pip / distribution name
-version = "0.2.0"
-description = "Conditional Variational Autoencoder for multivariate outcomes (Bernoulli, Gaussian, Poisson)"
+version = "0.3.0"
+description = "Conditional Variational Autoencoder for multivariate Bernoulli, categorical, Gaussian, and Poisson outcomes"
 readme = "README.md"
 requires-python = ">=3.9"
 
@@ -19,6 +19,7 @@ keywords = [
   "cvae",
   "variational-autoencoder",
   "multivariate",
+  "categorical",
   "simulation",
   "generative-models",
   "machine-learning",

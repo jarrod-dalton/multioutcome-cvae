@@ -1,3 +1,38 @@
+# multioutcome-cvae 0.3.0
+
+Unreleased.
+
+## Mixed-cardinality categorical outcomes
+
+- Added production support for joint nominal outcomes with different numbers
+  of levels, including two-level outcomes, through
+  `outcome_type="categorical"` and an explicit outcome schema.
+- Added grouped softmax likelihoods, mask-aware one-hot encoder inputs, named
+  probability outputs, valid integer-code generation, and bounded expanded
+  decoder batches.
+- Added analytic tests showing that every two-level categorical group is
+  distributionally equivalent to a Bernoulli outcome.
+
+## Portable inference
+
+- Added versioned `save_cvae()` and `load_cvae()` inference checkpoints that
+  retain model architecture, X scaling, outcome family, and categorical
+  metadata.
+- Added `export_categorical_r()` and a format-version-2 dependency-free base-R
+  runtime with schema inspection, grouped probabilities, and shared-latent
+  categorical simulation.
+- Preserved the Bernoulli R format-version-1 exporter and its public behavior.
+
+## Validation and documentation
+
+- Added Python/R fixed-latent probability parity, checkpoint round-trip,
+  categorical mask, batching, generation, and neutral mixed-cardinality
+  recovery coverage.
+- Clarified that shared latent variables model joint dependence but do not
+  guarantee complete recovery of the joint distribution.
+- Kept mixed discrete/continuous decoders, ordinal likelihoods, automatic label
+  encoding, and standalone R training out of scope.
+
 # multioutcome-cvae 0.2.0
 
 Released 2026-07-14.

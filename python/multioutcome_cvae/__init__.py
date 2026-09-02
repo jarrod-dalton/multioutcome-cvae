@@ -11,7 +11,8 @@ from .simulate import (
     simulate_cvae_data,
     summarize_binary_matrix,
 )
-from .export_r import export_bernoulli_r
+from .export_r import export_bernoulli_r, export_categorical_r
+from .persistence import load_cvae, save_cvae
 
 _DIAGNOSTIC_EXPORTS = {
     "calibration_curve_with_ci",
@@ -48,6 +49,9 @@ __all__ = [
     "summarize_binary_matrix",
     "compare_real_vs_generated",
     "export_bernoulli_r",
+    "export_categorical_r",
+    "save_cvae",
+    "load_cvae",
 
     # Diagnostics tools
     "calibration_curve_with_ci",
