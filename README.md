@@ -254,8 +254,13 @@ This is the “Python consumer” side of the MLflow run created by `train_with_
 Production-supported outcome types are:
 
 - `outcome_type="bernoulli"` – multivariate 0/1 outcomes  
-- `outcome_type="categorical"` – multivariate nominal outcomes with two or more levels each
 - `outcome_type="gaussian"`  – multivariate continuous outcomes  
+
+`outcome_type="categorical"` has a supported, versioned engineering contract
+for multivariate nominal outcomes with two or more levels each. Its broader
+probabilistic predictive validation is still in progress in
+[GitHub Issue #2](https://github.com/jarrod-dalton/multioutcome-cvae/issues/2),
+so downstream use should remain explicitly experimental and replaceable.
 
 Poisson support remains available for compatibility but is deprecated and is
 not production-supported. Negative Binomial remains experimental and is not
@@ -263,7 +268,7 @@ available through `CVAETrainer`.
 Unrelated legacy findings intentionally deferred from this enhancement are
 listed in `docs/deferred_audit_findings.md`.
 
-Production fitting requires complete, finite `X` and `Y`. Categorical `Y`
+Fitting requires complete, finite `X` and `Y`. Categorical `Y`
 contains zero-based integer codes and requires `outcome_schema`. Perform any
 other imputation upstream and apply the same preprocessing before inference.
 
@@ -308,6 +313,15 @@ zero-based, half-open `[start, stop)` pairs.
 As with any model artifact, load checkpoints only from a trusted source; older
 PyTorch releases do not provide the restricted tensor-only loader used by
 current releases.
+
+Checkpoint v1 does not embed predictor names. A downstream pipeline must bind
+each checkpoint to a versioned ordered-feature manifest and validate that
+order before passing a NumPy matrix. While categorical predictive validation
+remains open, also pin the package revision and record an artifact hash rather
+than assuming that the current loader is a permanent cross-version migration
+layer.
+The complete governed integration checklist is in
+[`docs/experimental_categorical_pipeline_contract.md`](docs/experimental_categorical_pipeline_contract.md).
 
 ### Bernoulli export
 
@@ -389,6 +403,14 @@ Y_sim <- cvae_simulate(
   decoder_batch_size = 10000L
 )
 ```
+
+When `feature_names` were embedded during export, supply a named `X_new`; the
+generated categorical runtime validates and reorders those columns. If a
+process needs more than one generated model at once, source each artifact into
+its own environment (for example, `model_env <- new.env();
+sys.source("categorical_cvae.R", envir = model_env)`) because the deliberately
+simple source format defines its model and helper functions in that
+environment.
 
 `probabilities` is a named list containing one matrix per outcome, with level
 names as columns. `Y_sim` contains zero-based integer codes. Python and R use

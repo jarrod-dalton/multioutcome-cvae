@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from multioutcome_cvae import CVAETrainer
@@ -106,3 +107,50 @@ def test_early_stopping_restores_best_checkpoint():
     assert history["epochs_ran"] == 2
     for name, expected in one_epoch.model.state_dict().items():
         torch.testing.assert_close(stopped.model.state_dict()[name], expected)
+
+
+def test_early_stopping_selection_and_patience_begin_at_requested_epoch():
+    rng = np.random.default_rng(188)
+    X = rng.normal(size=(24, 2)).astype(np.float32)
+    Y = rng.binomial(1, 0.5, size=(24, 3)).astype(np.float32)
+    start_epoch = 3
+    patience = 2
+
+    trainer = CVAETrainer(2, 3, latent_dim=2, hidden_dim=8, n_hidden_layers=1)
+    history = trainer.fit(
+        X[4:],
+        Y[4:],
+        X_val=X[:4],
+        Y_val=Y[:4],
+        epochs=8,
+        batch_size=5,
+        early_stopping_patience=patience,
+        early_stopping_min_delta=1e9,
+        early_stopping_start_epoch=start_epoch,
+        verbose=False,
+        seed=188,
+    )
+
+    # The first eligible epoch always establishes the checkpoint. With an
+    # unattainable subsequent improvement, exactly `patience` more epochs run.
+    assert history["early_stopping_start_epoch"] == start_epoch
+    assert history["best_epoch"] == start_epoch
+    assert history["epochs_ran"] == start_epoch + patience
+
+
+def test_early_stopping_start_cannot_exceed_epochs_with_validation_data():
+    rng = np.random.default_rng(288)
+    X = rng.normal(size=(12, 2)).astype(np.float32)
+    Y = rng.binomial(1, 0.5, size=(12, 3)).astype(np.float32)
+    trainer = CVAETrainer(2, 3, latent_dim=2, hidden_dim=8, n_hidden_layers=1)
+
+    with pytest.raises(ValueError, match="cannot exceed num_epochs"):
+        trainer.fit(
+            X[4:],
+            Y[4:],
+            X_val=X[:4],
+            Y_val=Y[:4],
+            epochs=2,
+            early_stopping_start_epoch=3,
+            verbose=False,
+        )

@@ -4,14 +4,20 @@ Unreleased.
 
 ## Mixed-cardinality categorical outcomes
 
-- Added production support for joint nominal outcomes with different numbers
+- Added engineering support for joint nominal outcomes with different numbers
   of levels, including two-level outcomes, through
   `outcome_type="categorical"` and an explicit outcome schema.
+- The categorical API and deployment artifacts are versioned, but broader
+  probabilistic predictive validation remains open in GitHub Issue #2; the
+  family should remain experimental in downstream scientific/production use.
 - Added grouped softmax likelihoods, mask-aware one-hot encoder inputs, named
   probability outputs, valid integer-code generation, and bounded expanded
   decoder batches.
 - Added analytic tests showing that every two-level categorical group is
   distributionally equivalent to a Bernoulli outcome.
+- Added a predeclared, generated Phase A predictive-validation workflow with
+  proper marginal and joint scores, oracle comparisons, conditional-
+  independence controls, quadrature diagnostics, and visible failure gates.
 
 ## Portable inference
 

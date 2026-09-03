@@ -389,10 +389,23 @@ def export_categorical_r(
                  .multioutcome_cvae_model$x_dim), call. = FALSE)
   }}
   expected <- .multioutcome_cvae_model$feature_names
-  if (!is.null(expected) && !is.null(colnames(X))) {{
-    missing_names <- setdiff(expected, colnames(X))
-    if (length(missing_names)) {{
-      stop(paste("X is missing required features:", paste(missing_names, collapse = ", ")),
+  if (!is.null(expected)) {{
+    supplied <- colnames(X)
+    if (is.null(supplied)) {{
+      stop("X must have column names because feature_names were embedded in this model.",
+           call. = FALSE)
+    }}
+    if (anyNA(supplied) || any(!nzchar(supplied)) || anyDuplicated(supplied)) {{
+      stop("X column names must be unique, non-missing, and non-empty.", call. = FALSE)
+    }}
+    missing_names <- setdiff(expected, supplied)
+    unexpected_names <- setdiff(supplied, expected)
+    if (length(missing_names) || length(unexpected_names)) {{
+      details <- c(
+        if (length(missing_names)) paste("missing:", paste(missing_names, collapse = ", ")),
+        if (length(unexpected_names)) paste("unexpected:", paste(unexpected_names, collapse = ", "))
+      )
+      stop(paste("X feature names do not match the model;", paste(details, collapse = "; ")),
            call. = FALSE)
     }}
     X <- X[, expected, drop = FALSE]
@@ -486,7 +499,7 @@ cvae_marginal_probabilities <- function(X, n_mc = 20L, seed = NULL,
     finish <- min(start + decoder_batch_size - 1, total)
     expanded <- seq.int(start, finish)
     row_ids <- as.integer((expanded - 1) %/% n_mc + 1)
-    Z <- matrix(rnorm(length(expanded) * .multioutcome_cvae_model$latent_dim),
+    Z <- matrix(stats::rnorm(length(expanded) * .multioutcome_cvae_model$latent_dim),
                 nrow = length(expanded))
     probabilities <- cvae_decoder_probabilities(X[row_ids, , drop = FALSE], Z)
     unique_rows <- unique(row_ids)
@@ -511,10 +524,10 @@ cvae_simulate <- function(X, n_samples_per_x = 1L, seed = NULL,
     finish <- min(start + decoder_batch_size - 1, total)
     expanded <- seq.int(start, finish)
     row_ids <- as.integer((expanded - 1) %/% n_samples_per_x + 1)
-    Z <- matrix(rnorm(length(expanded) * .multioutcome_cvae_model$latent_dim),
+    Z <- matrix(stats::rnorm(length(expanded) * .multioutcome_cvae_model$latent_dim),
                 nrow = length(expanded))
     probabilities <- cvae_decoder_probabilities(X[row_ids, , drop = FALSE], Z)
-    uniforms <- matrix(runif(length(expanded) * .multioutcome_cvae_model$y_dim),
+    uniforms <- matrix(stats::runif(length(expanded) * .multioutcome_cvae_model$y_dim),
                        nrow = length(expanded))
     chunk <- matrix(0L, length(expanded), .multioutcome_cvae_model$y_dim)
     for (outcome in seq_len(.multioutcome_cvae_model$y_dim)) {{

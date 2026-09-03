@@ -10,9 +10,11 @@ from torch.utils.data import Dataset, DataLoader
 from torch.special import gammaln  # PyTorch >= 1.8
 
 # ---------------------------------------------------------------------------
-# Production-supported outcomes are "bernoulli" (binary Y), "categorical"
-# (mixed-cardinality nominal Y), and "gaussian" (normal Y). "poisson"
-# (count Y) remains available for compatibility but is deprecated.
+# Bernoulli (binary Y) and Gaussian (normal Y) are the established
+# production-supported families. Categorical (mixed-cardinality nominal Y)
+# has a supported engineering/API contract while its broader probabilistic
+# validation remains in progress. Poisson (count Y) remains available for
+# compatibility but is deprecated.
 #
 # In experimentation, the CVAE performed reasonably well for generated 
 # binary and continuous data. The Poisson model estimated conditional
@@ -25,12 +27,20 @@ from torch.special import gammaln  # PyTorch >= 1.8
 # ---------------------------------------------------------------------------
 
 # Production-supported outcome families
-PRODUCTION_OUTCOME_TYPES = ("bernoulli", "gaussian", "categorical")
+PRODUCTION_OUTCOME_TYPES = ("bernoulli", "gaussian")
+
+# Publicly implemented, but still gated on the predictive-validation evidence
+# tracked in GitHub Issue #2 before production goodness-of-fit claims.
+VALIDATION_PENDING_OUTCOME_TYPES = ("categorical",)
 
 # Retained for compatibility, without a production guarantee
 DEPRECATED_OUTCOME_TYPES = ("poisson",)
 
-VALID_OUTCOME_TYPES = PRODUCTION_OUTCOME_TYPES + DEPRECATED_OUTCOME_TYPES
+VALID_OUTCOME_TYPES = (
+    PRODUCTION_OUTCOME_TYPES
+    + VALIDATION_PENDING_OUTCOME_TYPES
+    + DEPRECATED_OUTCOME_TYPES
+)
 
 # Experimental / unstable:
 EXPERIMENTAL_OUTCOME_TYPES = ("neg_binomial",)
@@ -804,6 +814,7 @@ class CVAETrainer:
         max_grad_norm: Optional[float] = None,
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 0.0,
+        early_stopping_start_epoch: int = 1,
     ) -> Dict[str, Any]:
         """
         Fit the CVAE.
@@ -816,6 +827,12 @@ class CVAETrainer:
 
         Y_mask_val : np.ndarray or None, shape (n_val, y_dim)
             Optional mask over Y_val, used for validation loss.
+
+        early_stopping_start_epoch : int
+            First epoch eligible for best-state selection and patience
+            counting. The default preserves historical behavior. Set this to
+            the end of KL warm-up when validation losses from changing KL
+            weights should not be compared for model selection.
         """
         # Allow both num_epochs and epochs; epochs is a simple alias used in tests.
         if epochs is not None:
@@ -847,6 +864,11 @@ class CVAETrainer:
             raise ValueError("early_stopping_patience must be a positive integer or None.")
         if not np.isfinite(early_stopping_min_delta) or early_stopping_min_delta < 0:
             raise ValueError("early_stopping_min_delta must be non-negative and finite.")
+        if (
+            not isinstance(early_stopping_start_epoch, (int, np.integer))
+            or early_stopping_start_epoch < 1
+        ):
+            raise ValueError("early_stopping_start_epoch must be a positive integer.")
 
         X_train = self._validate_matrix(X_train, "X", self.x_dim)
         Y_train = self._validate_outcomes(Y_train, "Y_train")
@@ -866,6 +888,11 @@ class CVAETrainer:
             Y_mask_val = self._validate_categorical_mask(
                 Y_mask_val, "Y_mask_val", X_val.shape[0]
             )
+            if early_stopping_start_epoch > num_epochs:
+                raise ValueError(
+                    "early_stopping_start_epoch cannot exceed num_epochs when "
+                    "validation data are provided."
+                )
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -903,6 +930,7 @@ class CVAETrainer:
             "val_recon_loss": [],
             "val_recon_per_outcome": [],
             "val_kl_loss": [],
+            "early_stopping_start_epoch": int(early_stopping_start_epoch),
         }
         best_val_loss = float("inf")
         best_state = None
@@ -1038,16 +1066,17 @@ class CVAETrainer:
                 )
                 history["val_kl_loss"].append(val_kl_epoch)
 
-                if val_loss_epoch < best_val_loss - early_stopping_min_delta:
-                    best_val_loss = val_loss_epoch
-                    best_epoch = epoch
-                    best_state = {
-                        key: value.detach().cpu().clone()
-                        for key, value in self.model.state_dict().items()
-                    }
-                    epochs_without_improvement = 0
-                else:
-                    epochs_without_improvement += 1
+                if epoch >= early_stopping_start_epoch:
+                    if val_loss_epoch < best_val_loss - early_stopping_min_delta:
+                        best_val_loss = val_loss_epoch
+                        best_epoch = epoch
+                        best_state = {
+                            key: value.detach().cpu().clone()
+                            for key, value in self.model.state_dict().items()
+                        }
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
 
             if verbose:
                 if val_loss_epoch is not None:
@@ -1062,6 +1091,7 @@ class CVAETrainer:
             if (
                 val_loader is not None
                 and early_stopping_patience is not None
+                and epoch >= early_stopping_start_epoch
                 and epochs_without_improvement >= early_stopping_patience
             ):
                 break
