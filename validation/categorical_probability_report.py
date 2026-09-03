@@ -380,10 +380,13 @@ def _plot_heterogeneity(
         ("focal probability RMSE", _oracle_focal_metric("rmse")),
         ("mean outcome total variation", _oracle_summary_metric("mean_outcome_total_variation")),
         ("mean outcome oracle KL", _oracle_summary_metric("mean_outcome_kl_regret")),
-        ("observed multiclass Brier", _diagnostic_metric("mean_outcome_multiclass_brier")),
+        (
+            "expected Brier regret",
+            _oracle_summary_metric("mean_outcome_expected_brier_regret"),
+        ),
     )
     plt = _pyplot()
-    fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.5), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.2), squeeze=False)
     for axis, (label, getter) in zip(axes.flat, specifications):
         for model in CANDIDATE_MODELS:
             means = []
@@ -433,7 +436,7 @@ def _plot_heterogeneity(
             )
         axis.axhline(0.0, color="0.45", linestyle="--", linewidth=1.0)
         _set_fixed_log_sample_ticks(axis, sample_sizes)
-        axis.set_title(f"heterogeneous - homogeneous: {label}")
+        axis.set_title(f"heterogeneous - homogeneous:\n{label}", fontsize=10)
         axis.set_xlabel("training sample size")
         axis.grid(alpha=0.18)
     handles, labels = axes[0, 0].get_legend_handles_labels()
@@ -441,7 +444,7 @@ def _plot_heterogeneity(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.945),
+        bbox_to_anchor=(0.5, 0.875),
         ncol=2,
         fontsize=9,
     )
@@ -449,9 +452,9 @@ def _plot_heterogeneity(
         "Decoder-width-matched schemas (same J and sum K; not entropy matched)\n"
         "paired seed differences, means with 95% t intervals; faint points are seeds",
         fontsize=13,
-        y=0.997,
+        y=0.965,
     )
-    fig.subplots_adjust(top=0.87, hspace=0.34, wspace=0.25)
+    fig.subplots_adjust(top=0.77, hspace=0.40, wspace=0.25)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -1753,7 +1756,10 @@ def _heterogeneity_paired_table(records: Sequence[Mapping[str, Any]]) -> List[st
         ("focal RMSE", _oracle_focal_metric("rmse")),
         ("mean TV", _oracle_summary_metric("mean_outcome_total_variation")),
         ("oracle KL regret", _oracle_summary_metric("mean_outcome_kl_regret")),
-        ("held-out Brier", _diagnostic_metric("mean_outcome_multiclass_brier")),
+        (
+            "expected Brier regret",
+            _oracle_summary_metric("mean_outcome_expected_brier_regret"),
+        ),
     )
     lines = [
         "| n | model | metric | heterogeneous - homogeneous, mean [95% paired t interval] | paired seeds |",
@@ -1877,8 +1883,8 @@ def render_categorical_probability_report(
     lines: List[str] = [
         "# Categorical CVAE conditional-probability validation",
         "",
-        f"Report format: `{REPORT_VERSION}`  ",
-        f"Experiment protocol: `{run['protocol']}`  ",
+        f"Report format: `{REPORT_VERSION}`<br>",
+        f"Experiment protocol: `{run['protocol']}`<br>",
         f"Protocol SHA-256: `{run['protocol_manifest_sha256']}`",
         "",
         (
@@ -2044,11 +2050,12 @@ def render_categorical_probability_report(
             *_quadrature_summary_table(base),
             "",
             (
-                "The machine-readable artifact contains experimental `truth_calibration_` "
-                "`intercept`/`slope` fields whose undamped Newton solver can diverge for rare "
-                "classes. Those fields are excluded from this report and every gate. Direct "
-                "oracle errors, reliability bins, ECE, AUC/AP, Brier scores, and all plotted "
-                "probabilities are unaffected."
+                "A post-run audit found that the original undamped Newton solver for the "
+                "experimental `truth_calibration_intercept`/`slope` fields could diverge "
+                "for rare classes. The committed artifact is a disclosed correction-only "
+                "rerun using centered/scaled damped Newton updates. Every nonexcluded result "
+                "field matched the first complete run exactly. These coefficients remain "
+                "excluded from the gates and headline evidence."
             ),
             "",
         ]
@@ -2135,13 +2142,13 @@ def render_categorical_probability_report(
             "",
             "The machine-readable result is committed losslessly as `docs/categorical_probability_validation_results.json.gz` to avoid adding a 62 MB pretty-printed JSON file to Git history.",
             (
-                "The canonical fits were produced from Git commit "
+                "The committed correction-only canonical artifact was produced from Git commit "
                 f"`{environment.get('git_head', 'not recorded')}` with runner SHA-256 "
-                f"`{environment.get('runner_source_sha256', 'not recorded')}`. A post-run "
-                "audit corrected only the excluded truth-calibration coefficient solver; "
-                "rerunning current source therefore corrects those unused fields without "
-                "changing the protocol, gates, or reported probability metrics. Checkout "
-                "the recorded commit to reproduce the exact canonical runner."
+                f"`{environment.get('runner_source_sha256', 'not recorded')}`. The first "
+                "complete run came from `113c5a6080980076ce753187c3f93ed72ab86e42`; "
+                "all fields other than runtime/provenance and the corrected, excluded "
+                "truth-calibration coefficients matched exactly. Checkout the recorded "
+                "artifact commit to reproduce the exact canonical runner."
             ),
             "",
             "```bash",
@@ -2165,7 +2172,7 @@ def render_categorical_probability_report(
             "- Reliability from realized outcomes is noisy for rare classes even with a large test set; direct oracle errors are the primary simulation evidence.",
             "- Initialization replicates reuse a fixed data split and therefore measure optimization sensitivity, not new-sample uncertainty.",
             "- Quadrature comparisons assess GH21 versus GH31 agreement, not mathematical proof that either order is exact.",
-            "- Experimental truth-calibration intercept/slope fields are excluded because their Newton solver was found to diverge in rare-class fits; no reported conclusion depends on them.",
+            "- Experimental truth-calibration intercept/slope fields were corrected after a disclosed rare-class solver defect and remain excluded from the gates and headline evidence.",
             "- Engineering envelopes are regime-specific safeguards rather than a global certification of predictive validity.",
             "",
         ]

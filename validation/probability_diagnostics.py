@@ -1131,7 +1131,7 @@ def plot_comparative_calibration_pages(
             fontsize=13,
             y=0.997,
         )
-        fig.subplots_adjust(top=0.86, hspace=0.50, wspace=0.30)
+        fig.subplots_adjust(top=0.81, hspace=0.50, wspace=0.30)
         filename = f"{filename_prefix}_{suffix}_{page_index:02d}.png"
         paths.append(_save_figure(fig, Path(output_dir) / filename, dpi))
     return paths
