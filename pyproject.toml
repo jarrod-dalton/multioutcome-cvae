@@ -43,7 +43,7 @@ dependencies = [
 plot = ["matplotlib>=3.3"]
 tuning = ["hyperopt>=0.2"]
 mlflow = ["mlflow>=2.0"]
-test = ["pytest>=7"]
+test = ["pytest>=7", "matplotlib>=3.3"]
 all = [
   "matplotlib>=3.3",
   "hyperopt>=0.2",
