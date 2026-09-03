@@ -1,3 +1,4 @@
+import gzip
 from pathlib import Path
 
 import numpy as np
@@ -206,6 +207,8 @@ def test_report_round_trip_writes_markdown_and_pngs(tmp_path):
     )
     report = output.read_text(encoding="utf-8")
     assert "partial/noncanonical subset" in report
+    assert "**Pipeline decision:**" in report
+    assert "Baseline probability and calibration" in report
     assert "macro ROC-AUC" in report
     assert "macro AP" in report
     assert "multiclass Brier" in report
@@ -224,6 +227,18 @@ def test_report_round_trip_writes_markdown_and_pngs(tmp_path):
     assert any("calibration_low_probability" in path.name for path in images)
     assert all(path.stat().st_size > 0 for path in images)
     assert "![" in report
+
+
+def test_report_loader_accepts_lossless_gzip_json(tmp_path):
+    run = _tiny_report_run()
+    json_path = write_probability_results(run, tmp_path / "results.json")
+    gzip_path = tmp_path / "results.json.gz"
+    with json_path.open("rb") as source, gzip.GzipFile(
+        filename=str(gzip_path), mode="wb", mtime=0
+    ) as target:
+        target.write(source.read())
+    loaded = load_probability_run(gzip_path)
+    assert loaded["protocol"] == run["protocol"]
 
 
 def test_report_validation_rejects_missing_records():

@@ -8,8 +8,11 @@ Unreleased.
   of levels, including two-level outcomes, through
   `outcome_type="categorical"` and an explicit outcome schema.
 - The categorical API and deployment artifacts are versioned, but broader
-  probabilistic predictive validation remains open in GitHub Issue #2; the
-  family should remain experimental in downstream scientific/production use.
+  probabilistic predictive validation remains open in GitHub Issue #2. The
+  frozen conditional-probability experiment met its full engineering envelope
+  in 0/34 cells, so the family remains experimental in downstream
+  scientific/production use even though the interface is stable enough for
+  reversible integration and shadow execution.
 - Added grouped softmax likelihoods, mask-aware one-hot encoder inputs, named
   probability outputs, valid integer-code generation, and bounded expanded
   decoder batches.
@@ -21,6 +24,16 @@ Unreleased.
 - The locked Phase A run is inconclusive: all marginal-improvement gates
   passed, while four joint predictive gates and 18 quadrature prerequisites
   failed. Categorical joint simulation remains experimental pending Issue #2.
+- Added a compiled conditional-probability validation report spanning low
+  prevalence, sample size, K=2/5/20, matched mixed cardinality, calibration,
+  AUC, average precision, Brier scores, direct oracle errors, and numerical
+  integration. Only 5/170 base fits met all predictive tolerances, 1/170 met
+  both predictive and numerical requirements, and the correctly specified
+  independent-softmax baseline was usually more accurate.
+- Replaced an unstable undamped Newton calculation for experimental
+  truth-calibration intercepts/slopes with centered, damped Newton updates and
+  a rare-probability regression test. The defective fields were not used by
+  any validation gate, score, or report plot.
 
 ## Portable inference
 

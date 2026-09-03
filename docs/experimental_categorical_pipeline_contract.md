@@ -9,14 +9,23 @@ model replaceable and must not describe its output as production-validated.
 
 ## Current evidence gate
 
-The locked [Phase A report](categorical_predictive_validation.md) is
-**inconclusive**. All marginal-improvement gates passed, and both latent units
-were active at the selected checkpoints, but the fitted joint distribution
-failed both conditional-independence controls, one mixed-cardinality dependent
-seed had negative joint gain, and 31-node versus 41-node quadrature was not
-stable enough in the tails. This is not the same failure mode as an unusable
-input/output API; it is evidence that the present joint predictions are not
-ready to drive production or scientific decisions.
+The locked [Phase A joint-distribution report](categorical_predictive_validation.md)
+is **inconclusive**. The complete
+[conditional-probability report](categorical_probability_validation.md) is
+more directly adverse: 0/34 regimes met the predeclared cell envelope, no cell
+met all five aggregate predictive checks even before the every-seed rule was
+applied, and only 1/170 base fits met both predictive and numerical criteria.
+The correctly specified independent-softmax comparator was more accurate in
+157/170 matched focal-MAE comparisons and 168/170 equal-outcome total-variation
+comparisons. More training data did not reliably improve the frozen CVAE, and
+large-n fits also developed material GH21-versus-GH31 integration disagreement.
+
+This is not a failure of the input/output API. It is evidence that the present
+training and marginal-integration workflow is not ready to supply calibrated
+conditional probabilities or learned residual dependence for production or
+scientific decisions. Ranking measures can still appear reasonable while
+individual probability estimates are too compressed toward the population
+mean.
 
 It is reasonable to build reversible plumbing now: schema validation,
 artifact registries, feature-manifest checks, shadow execution, and interfaces
@@ -24,6 +33,15 @@ that can swap in another conditional joint generator. Do not yet make the
 current categorical CVAE a hard dependency for irreversible pipeline choices,
 calibration claims, or downstream estimands that rely on its learned residual
 dependence.
+
+The next validation cycle should first separate the two observed problems:
+compare fixed-checkpoint Gauss-Hermite estimates with scrambled Sobol QMC, then
+ablate KL weight, fixed epochs versus fixed optimizer updates, a no-latent
+decoder, and checkpoint selection on prior-integrated marginal log score or
+Brier score. A hardened workflow must approach the independent-softmax
+marginals under the model-aligned DGP, improve with nested sample size, ignore
+the latent variable under the rho=0 control, converge numerically, and remain
+stable across initializations before this gate changes.
 
 ## Required pipeline manifest
 

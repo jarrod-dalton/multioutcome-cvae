@@ -258,13 +258,18 @@ Production-supported outcome types are:
 
 `outcome_type="categorical"` has a supported, versioned engineering contract
 for multivariate nominal outcomes with two or more levels each. Its broader
-probabilistic predictive validation is still in progress in
+probabilistic predictive validation remains open in
 [GitHub Issue #2](https://github.com/jarrod-dalton/multioutcome-cvae/issues/2),
-so downstream use should remain explicitly experimental and replaceable. The
-locked [Phase A validation report](docs/categorical_predictive_validation.md)
-is **inconclusive**: marginal score gates passed, but residual-dependence
-behavior and numerical integration gates did not. Do not make a production
-joint-prediction claim from the current evidence.
+so downstream use must remain explicitly experimental and replaceable. The
+locked [Phase A joint-distribution report](docs/categorical_predictive_validation.md)
+is **inconclusive**. More importantly for marginal prediction, the complete
+[conditional-probability report](docs/categorical_probability_validation.md)
+is **unfavorable**: the frozen workflow met its full engineering envelope in
+0/34 cells, only 5/170 base fits met all predictive tolerances, and only 1/170
+also met the numerical prerequisites. A correctly specified independent
+softmax model was usually more accurate. The API may be used for reversible
+plumbing and shadow runs, but do not treat the current categorical CVAE as a
+validated probability engine or make a production joint-prediction claim.
 
 Poisson support remains available for compatibility but is deprecated and is
 not production-supported. Negative Binomial remains experimental and is not

@@ -877,6 +877,20 @@ def _annotate_bin_counts(
         )
 
 
+def _bin_count_summary(bins: Sequence[Mapping[str, Any]]) -> str:
+    counts = [int(item["count"]) for item in bins]
+    if not counts:
+        return "no displayed bins"
+    if min(counts) == max(counts):
+        return f"bin n={counts[0]}"
+    return f"bin n={min(counts)}-{max(counts)}"
+
+
+def _display_model_label(model: Any) -> str:
+    label = str(model).replace("_", " ")
+    return "categorical CVAE" if label.lower() == "cvae" else label
+
+
 def plot_calibration_pages(
     diagnostics: Mapping[str, Any],
     output_dir: Path,
@@ -904,7 +918,7 @@ def plot_calibration_pages(
         fig, axes = plt.subplots(
             n_rows,
             n_columns,
-            figsize=(4.0 * n_columns, 3.45 * n_rows),
+            figsize=(4.2 * n_columns, 4.05 * n_rows),
             squeeze=False,
         )
         for axis, record in zip(axes.flat, page):
@@ -974,10 +988,16 @@ def plot_calibration_pages(
             axis.set_visible(False)
         fig.suptitle(
             f"{model_label} one-vs-rest calibration"
-            + (f" (0-{probability_limit:g} zoom)" if probability_limit < 1.0 else "")
+            + (
+                f" (predicted probability 0-{probability_limit:g}; y axis retained 0-1)"
+                if probability_limit < 1.0
+                else ""
+            )
             + "; labels give bin n",
             fontsize=13,
+            y=0.997,
         )
+        fig.subplots_adjust(top=0.90, hspace=0.48, wspace=0.30)
         filename = f"{filename_prefix}_{suffix}_{page_index:02d}.png"
         paths.append(_save_figure(fig, Path(output_dir) / filename, dpi))
     return paths
@@ -1021,7 +1041,7 @@ def plot_comparative_calibration_pages(
         fig, axes = plt.subplots(
             n_rows,
             n_columns,
-            figsize=(4.15 * n_columns, 3.55 * n_rows),
+            figsize=(4.3 * n_columns, 4.15 * n_rows),
             squeeze=False,
         )
         for axis, key in zip(axes.flat, page):
@@ -1032,6 +1052,7 @@ def plot_comparative_calibration_pages(
                 color="0.45",
                 linewidth=1.0,
             )
+            displayed_bins: List[Mapping[str, Any]] = []
             for model_index, (model, model_records) in enumerate(record_maps.items()):
                 record = model_records[key]
                 bins = [
@@ -1041,6 +1062,7 @@ def plot_comparative_calibration_pages(
                 ]
                 if not bins:
                     continue
+                displayed_bins.extend(bins)
                 x = np.array([item["mean_predicted"] for item in bins])
                 y = np.array([item["observed_fraction"] for item in bins])
                 lower = np.array([item["observed_wilson_lower_95"] for item in bins])
@@ -1061,14 +1083,7 @@ def plot_comparative_calibration_pages(
                     color=colors(model_index % 10),
                     linestyle="none",
                     markerfacecolor="white",
-                    label=f"{model}: observed",
-                )
-                _annotate_bin_counts(
-                    axis,
-                    x,
-                    y,
-                    bins,
-                    color=colors(model_index % 10),
+                    label=f"{_display_model_label(model)}: observed",
                 )
                 if "mean_oracle_probability" in bins[0]:
                     axis.plot(
@@ -1078,12 +1093,13 @@ def plot_comparative_calibration_pages(
                         markersize=3.2,
                         linewidth=1.2,
                         color=colors(model_index % 10),
-                        label=f"{model}: oracle",
+                        label=f"{_display_model_label(model)}: oracle",
                     )
             first_record = next(iter(record_maps.values()))[key]
             axis.set_title(
                 f"{key[0]}: {key[1]}\n"
-                f"events={first_record['event_count']}/{first_record['n']}",
+                f"events={first_record['event_count']}/{first_record['n']}; "
+                f"{_bin_count_summary(displayed_bins)}",
                 fontsize=9,
             )
             axis.set_xlim(0.0, probability_limit)
@@ -1101,16 +1117,21 @@ def plot_comparative_calibration_pages(
                 handles,
                 labels,
                 loc="upper center",
+                bbox_to_anchor=(0.5, 0.948),
                 ncol=min(4, len(labels)),
                 fontsize=8,
             )
         fig.suptitle(
             "One-vs-rest observed calibration by model"
-            + (f" (0-{probability_limit:g} zoom)" if probability_limit < 1.0 else "")
-            + "; labels give bin n",
+            + (
+                f" (predicted probability 0-{probability_limit:g}; y axis retained 0-1)"
+                if probability_limit < 1.0
+                else ""
+            ),
             fontsize=13,
-            y=1.01,
+            y=0.997,
         )
+        fig.subplots_adjust(top=0.86, hspace=0.50, wspace=0.30)
         filename = f"{filename_prefix}_{suffix}_{page_index:02d}.png"
         paths.append(_save_figure(fig, Path(output_dir) / filename, dpi))
     return paths

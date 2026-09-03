@@ -957,27 +957,99 @@ def _fractional_logistic_calibration(
     fitted_probability: np.ndarray,
     epsilon: float,
 ) -> Dict[str, Optional[float]]:
-    """Fit truth-based intercept/slope without Bernoulli outcome noise."""
+    """Fit truth-based intercept/slope without Bernoulli outcome noise.
+
+    The two-parameter objective is convex, but undamped Newton updates can
+    diverge for rare probabilities.  Centering/scaling the fitted logits and
+    using an Armijo backtracking step keeps the diagnostic finite.  A failed
+    or non-identifiable fit is represented explicitly by ``None`` rather than
+    by a numerically meaningless large coefficient.
+    """
     actual = np.asarray(actual_probability, dtype=np.float64)
-    fitted = np.clip(np.asarray(fitted_probability, dtype=np.float64), epsilon, 1.0 - epsilon)
+    fitted_raw = np.asarray(fitted_probability, dtype=np.float64)
+    if actual.ndim != 1 or fitted_raw.ndim != 1 or actual.shape != fitted_raw.shape:
+        raise ValueError(
+            "actual_probability and fitted_probability must be same-length vectors."
+        )
+    if actual.size < 1 or not np.isfinite(actual).all() or not np.isfinite(fitted_raw).all():
+        raise ValueError("Calibration probabilities must be nonempty and finite.")
+    if np.any(actual < 0.0) or np.any(actual > 1.0):
+        raise ValueError("actual_probability values must lie in [0, 1].")
+    if np.any(fitted_raw < 0.0) or np.any(fitted_raw > 1.0):
+        raise ValueError("fitted_probability values must lie in [0, 1].")
+    if not math.isfinite(epsilon) or epsilon <= 0.0 or epsilon >= 0.5:
+        raise ValueError("epsilon must lie strictly between 0 and 0.5.")
+
+    fitted = np.clip(fitted_raw, epsilon, 1.0 - epsilon)
     logit = np.log(fitted) - np.log1p(-fitted)
-    if float(np.std(logit)) < 1.0e-12:
+    logit_mean = float(np.mean(logit))
+    logit_scale = float(np.std(logit))
+    if logit_scale < 1.0e-10:
         return {"intercept": None, "slope": None}
-    design = np.column_stack((np.ones(logit.size), logit))
-    coefficients = np.array([0.0, 1.0], dtype=np.float64)
-    for _ in range(60):
+
+    target_mean = float(np.mean(actual))
+    if target_mean <= epsilon or target_mean >= 1.0 - epsilon:
+        return {"intercept": None, "slope": None}
+    standardized_logit = (logit - logit_mean) / logit_scale
+    design = np.column_stack((np.ones(logit.size), standardized_logit))
+    coefficients = np.array(
+        [math.log(target_mean) - math.log1p(-target_mean), 0.0],
+        dtype=np.float64,
+    )
+
+    def objective(candidate: np.ndarray) -> float:
+        linear_predictor = design @ candidate
+        return float(
+            np.mean(np.logaddexp(0.0, linear_predictor) - actual * linear_predictor)
+        )
+
+    converged = False
+    for _ in range(100):
         calibrated = _sigmoid(design @ coefficients)
         gradient = design.T @ (calibrated - actual) / actual.size
-        variance = np.maximum(calibrated * (1.0 - calibrated), 1.0e-10)
-        hessian = (design.T * variance) @ design / actual.size
-        hessian += np.eye(2) * 1.0e-10
-        step = np.linalg.solve(hessian, gradient)
-        coefficients -= step
-        if float(np.max(np.abs(step))) < 1.0e-10:
+        if float(np.max(np.abs(gradient))) < 1.0e-10:
+            converged = True
             break
+        variance = calibrated * (1.0 - calibrated)
+        hessian = (design.T * variance) @ design / actual.size
+        try:
+            step = np.linalg.solve(hessian, gradient)
+        except np.linalg.LinAlgError:
+            step = np.linalg.solve(hessian + np.eye(2) * 1.0e-10, gradient)
+        if not np.isfinite(step).all():
+            return {"intercept": None, "slope": None}
+
+        current_objective = objective(coefficients)
+        directional_decrease = float(gradient @ step)
+        step_fraction = 1.0
+        accepted = False
+        for _ in range(50):
+            candidate = coefficients - step_fraction * step
+            candidate_objective = objective(candidate)
+            if math.isfinite(candidate_objective) and candidate_objective <= (
+                current_objective - 1.0e-4 * step_fraction * directional_decrease
+            ):
+                coefficients = candidate
+                accepted = True
+                break
+            step_fraction *= 0.5
+        if not accepted:
+            return {"intercept": None, "slope": None}
+        if float(np.max(np.abs(step_fraction * step))) < 1.0e-10:
+            converged = True
+            break
+    if not converged:
+        final_probability = _sigmoid(design @ coefficients)
+        final_gradient = design.T @ (final_probability - actual) / actual.size
+        converged = float(np.max(np.abs(final_gradient))) < 1.0e-8
+    if not converged or not np.isfinite(coefficients).all():
+        return {"intercept": None, "slope": None}
+
+    slope = float(coefficients[1] / logit_scale)
+    intercept = float(coefficients[0] - slope * logit_mean)
     return {
-        "intercept": float(coefficients[0]),
-        "slope": float(coefficients[1]),
+        "intercept": intercept,
+        "slope": slope,
     }
 
 

@@ -14,6 +14,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import os
@@ -255,6 +256,19 @@ def _group_values(
     return _mean_95_half_width(numeric)
 
 
+def _set_fixed_log_sample_ticks(axis: Any, sample_sizes: Sequence[int]) -> None:
+    """Show only the sample sizes that were actually evaluated."""
+
+    from matplotlib.ticker import FixedFormatter, FixedLocator, NullLocator
+
+    axis.set_xscale("log")
+    axis.xaxis.set_major_locator(FixedLocator(sample_sizes))
+    axis.xaxis.set_major_formatter(
+        FixedFormatter([f"{int(value):,}" for value in sample_sizes])
+    )
+    axis.xaxis.set_minor_locator(NullLocator())
+
+
 def _plot_core_metric_group(
     records: Sequence[Mapping[str, Any]],
     specifications: Sequence[Tuple[str, MetricGetter]],
@@ -292,9 +306,10 @@ def _plot_core_metric_group(
                 axis = axes[row_index, prevalence_index]
                 for k_index, cardinality in enumerate(cardinalities):
                     means = []
-                    errors = []
+                    lower_errors = []
+                    upper_errors = []
                     for sample_size in sample_sizes:
-                        mean, standard_error = _group_values(
+                        mean, half_width = _group_values(
                             core,
                             model,
                             getter,
@@ -305,20 +320,23 @@ def _plot_core_metric_group(
                             ),
                         )
                         means.append(mean)
-                        errors.append(standard_error)
+                        # Every metric in these core panels is nonnegative. A
+                        # symmetric small-sample t interval can cross zero, so
+                        # truncate only its displayed lower whisker at the
+                        # metric's natural boundary.
+                        lower_errors.append(min(half_width, max(mean, 0.0)))
+                        upper_errors.append(half_width)
                     axis.errorbar(
                         sample_sizes,
                         means,
-                        yerr=errors,
+                        yerr=np.vstack((lower_errors, upper_errors)),
                         marker="o",
                         linewidth=1.3,
                         capsize=2,
                         color=cmap(k_index / max(1, len(cardinalities) - 1)),
                         label=f"K={cardinality}",
                     )
-                axis.set_xscale("log")
-                axis.set_xticks(sample_sizes)
-                axis.set_xticklabels([str(value) for value in sample_sizes])
+                _set_fixed_log_sample_ticks(axis, sample_sizes)
                 axis.grid(alpha=0.18)
                 if row_index == 0:
                     axis.set_title(f"focal prevalence={prevalence:g}")
@@ -331,12 +349,19 @@ def _plot_core_metric_group(
                     axis.set_xlabel("training sample size")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=len(labels))
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.925),
+            ncol=len(labels),
+        )
     fig.suptitle(
         title + "\nmeans with 95% t intervals across fixed data seeds",
         fontsize=13,
-        y=1.01,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.875, hspace=0.32, wspace=0.20)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -407,20 +432,26 @@ def _plot_heterogeneity(
                 label=MODEL_LABELS[model],
             )
         axis.axhline(0.0, color="0.45", linestyle="--", linewidth=1.0)
-        axis.set_xscale("log")
-        axis.set_xticks(sample_sizes)
-        axis.set_xticklabels([str(value) for value in sample_sizes])
+        _set_fixed_log_sample_ticks(axis, sample_sizes)
         axis.set_title(f"heterogeneous - homogeneous: {label}")
         axis.set_xlabel("training sample size")
         axis.grid(alpha=0.18)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=9)
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.945),
+        ncol=2,
+        fontsize=9,
+    )
     fig.suptitle(
         "Decoder-width-matched schemas (same J and sum K; not entropy matched)\n"
         "paired seed differences, means with 95% t intervals; faint points are seeds",
         fontsize=13,
-        y=1.02,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.87, hspace=0.34, wspace=0.25)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -485,13 +516,20 @@ def _plot_rho_control(
         axis.set_xlabel("Gaussian-copula correlation")
         axis.grid(alpha=0.18)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(labels))
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.94),
+        ncol=len(labels),
+    )
     fig.suptitle(
         "Marginal probability recovery with and without residual dependence\n"
         "means with 95% t intervals across fixed data seeds",
         fontsize=13,
-        y=1.02,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.86, hspace=0.34, wspace=0.25)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -565,22 +603,27 @@ def _plot_quadrature_diagnostics(
                 thresholds[0], color="#a83232", linestyle="--", linewidth=1.0,
                 label="engineering tolerance",
             )
-        axis.set_xscale("log")
-        axis.set_yscale("symlog", linthresh=1.0e-8)
-        axis.set_xticks(sample_sizes)
-        axis.set_xticklabels([str(value) for value in sample_sizes])
+        _set_fixed_log_sample_ticks(axis, sample_sizes)
+        axis.set_yscale("log")
         axis.set_title(label)
         axis.set_xlabel("training sample size")
         axis.grid(alpha=0.18)
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=min(4, len(labels)))
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.945),
+            ncol=min(4, len(labels)),
+        )
     fig.suptitle(
         "Numerical sensitivity of fitted marginal probabilities: GH21 versus GH31\n"
         "means and full ranges across focal prevalences and fixed seeds",
         fontsize=13,
-        y=1.02,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.87, hspace=0.34, wspace=0.25)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -668,13 +711,20 @@ def _plot_focal_true_probability_bands(
                 axis.set_xlabel("known p-true range")
             axis.grid(axis="y", alpha=0.18)
     handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels, loc="upper center", ncol=len(legend_labels))
+    fig.legend(
+        handles,
+        legend_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.945),
+        ncol=len(legend_labels),
+    )
     fig.suptitle(
         "Focal-class error by known conditional-probability band\n"
         "means and full fit-level ranges across n, K, and fixed seeds",
         fontsize=13,
-        y=1.01,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.89, hspace=0.30, wspace=0.23, bottom=0.13)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -760,14 +810,16 @@ def _plot_low_prevalence_training_counts(
         color_handles + marker_handles,
         [handle.get_label() for handle in color_handles + marker_handles],
         loc="upper center",
+        bbox_to_anchor=(0.5, 0.945),
         ncol=len(color_handles + marker_handles),
         fontsize=8,
     )
     fig.suptitle(
         "Low-prevalence CVAE error versus the focal event count actually seen in training",
         fontsize=13,
-        y=1.01,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.88, hspace=0.40, wspace=0.27)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -821,12 +873,20 @@ def _plot_initialization_diagnostics(
         axis.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         axis.grid(alpha=0.18)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=1, fontsize=8)
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.945),
+        ncol=1,
+        fontsize=8,
+    )
     fig.suptitle(
         "CVAE sensitivity to initialization on the same fixed data split",
         fontsize=13,
-        y=1.03,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.82, hspace=0.34, wspace=0.25)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -843,7 +903,7 @@ def _plot_sentinel_probability_agreement(
     )[:, class_index]
     plt = _pyplot()
     fig, axes = plt.subplots(
-        len(CANDIDATE_MODELS), 2, figsize=(9.2, 4.0 * len(CANDIDATE_MODELS)),
+        len(CANDIDATE_MODELS), 2, figsize=(9.4, 4.65 * len(CANDIDATE_MODELS)),
         squeeze=False,
     )
     for model_index, model in enumerate(CANDIDATE_MODELS):
@@ -910,8 +970,9 @@ def _plot_sentinel_probability_agreement(
         f"n={factors['n_train']}, target prevalence={factors['focal_prevalence']}, "
         f"cardinalities={record['cardinalities']}",
         fontsize=13,
-        y=1.01,
+        y=0.997,
     )
+    fig.subplots_adjust(top=0.89, hspace=0.52, wspace=0.34)
     return _save_figure(fig, output_path, dpi)
 
 
@@ -1222,6 +1283,333 @@ def _plain_english_summary(records: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
+def _focal_score_by_prevalence_table(
+    records: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    core = [record for record in records if record["factors"]["design"] == "core"]
+    lines = [
+        "| target prevalence | CVAE focal Brier | oracle focal Brier | CVAE focal ECE | CVAE focal ROC-AUC | CVAE focal AP | observed prevalence (AP null) |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for prevalence in _unique_sorted(
+        [float(record["factors"]["focal_prevalence"]) for record in core]
+    ):
+        group = [
+            record
+            for record in core
+            if float(record["factors"]["focal_prevalence"]) == prevalence
+        ]
+
+        def median_diagnostic(model: str, key: str) -> Optional[float]:
+            values = []
+            for record in group:
+                if model not in record["model_diagnostics"]["models"]:
+                    continue
+                value = _focal_diagnostic(record, model).get(key)
+                if value is not None:
+                    values.append(float(value))
+            return float(np.median(values)) if values else None
+
+        observed = np.median(
+            [
+                int(record["focal_test_count"]) / int(record["factors"]["n_test"])
+                for record in group
+            ]
+        )
+        lines.append(
+            f"| {prevalence:g} | {_format(median_diagnostic('cvae', 'binary_brier'), 5)} | "
+            f"{_format(median_diagnostic('oracle', 'binary_brier'), 5)} | "
+            f"{_format(median_diagnostic('cvae', 'ece'))} | "
+            f"{_format(median_diagnostic('cvae', 'auc'), 3)} | "
+            f"{_format(median_diagnostic('cvae', 'pr_auc'), 3)} | {observed:.3f} |"
+        )
+    return lines
+
+
+def _core_cardinality_table(records: Sequence[Mapping[str, Any]]) -> List[str]:
+    core = [record for record in records if record["factors"]["design"] == "core"]
+    lines = [
+        "| n | K | CVAE focal MAE | CVAE mean-outcome TV | softmax mean-outcome TV | CVAE KL regret |",
+        "|---:|---:|---:|---:|---:|---:|",
+    ]
+    sample_sizes = _unique_sorted(
+        [int(record["factors"]["n_train"]) for record in core]
+    )
+    cardinalities = _unique_sorted(
+        [int(record["factors"]["maximum_cardinality"]) for record in core]
+    )
+    for sample_size in sample_sizes:
+        for cardinality in cardinalities:
+            group = [
+                record
+                for record in core
+                if int(record["factors"]["n_train"]) == sample_size
+                and int(record["factors"]["maximum_cardinality"]) == cardinality
+            ]
+            if not group:
+                continue
+            median = lambda values: float(np.median(list(values)))
+            lines.append(
+                f"| {sample_size:,} | {cardinality} | "
+                f"{median(_oracle_focal(record, 'cvae')['mae'] for record in group):.4f} | "
+                f"{median(_oracle_summary(record, 'cvae')['mean_outcome_total_variation'] for record in group):.4f} | "
+                f"{median(_oracle_summary(record, 'independent_softmax')['mean_outcome_total_variation'] for record in group):.4f} | "
+                f"{median(_oracle_summary(record, 'cvae')['mean_outcome_kl_regret'] for record in group):.4f} |"
+            )
+    return lines
+
+
+def _factor_finding_lines(records: Sequence[Mapping[str, Any]]) -> List[str]:
+    core = [record for record in records if record["factors"]["design"] == "core"]
+    if not core:
+        return []
+    lines = ["## What the experiment says about the requested circumstances", ""]
+
+    lines.extend(["### Baseline probability and calibration", ""])
+    for prevalence in _unique_sorted(
+        [float(record["factors"]["focal_prevalence"]) for record in core]
+    ):
+        group = [
+            record
+            for record in core
+            if float(record["factors"]["focal_prevalence"]) == prevalence
+        ]
+        focal_mae = float(
+            np.median([_oracle_focal(record, "cvae")["mae"] for record in group])
+        )
+        focal_p95 = float(
+            np.median(
+                [
+                    _oracle_focal(record, "cvae")["absolute_error_p95"]
+                    for record in group
+                ]
+            )
+        )
+        absolute_bias = float(
+            np.median(
+                [abs(_oracle_focal(record, "cvae")["bias"]) for record in group]
+            )
+        )
+        lines.append(
+            f"- With a {100 * prevalence:g}% population-average focal probability, "
+            f"the median individual-probability MAE was {focal_mae:.4f} "
+            f"({100 * focal_mae:.2f} percentage points), the median 95th-percentile "
+            f"absolute error was {focal_p95:.4f}, and the median absolute fit-level "
+            f"bias was {absolute_bias:.4f}."
+        )
+    lines.extend(
+        [
+            "",
+            (
+                "A smaller absolute error at 1% does not mean rare outcomes were easy: "
+                "an MAE near 0.0056 is about half of a 1% population-average risk. "
+                "The target prevalence is a population mean; each person's p-true varies with X."
+            ),
+            "",
+            *_focal_score_by_prevalence_table(core),
+            "",
+            (
+                "The raw focal Brier score stays numerically close to the oracle because "
+                "irreducible outcome noise and prevalence dominate that score. Direct "
+                "p-hat-versus-p-true errors and Brier regret are more sensitive to the "
+                "conditional-probability error in this simulation. AUC and AP can look "
+                "respectable while the probabilities themselves are miscalibrated."
+            ),
+            "",
+        ]
+    )
+
+    band_targets = {
+        0.01: "[0.05, 0.1)",
+        0.05: "[0.2, 0.5)",
+        0.20: "[0.5, 1]",
+    }
+    shrinkage_parts = []
+    for prevalence, label in band_targets.items():
+        values = [
+            band
+            for record in core
+            if math.isclose(
+                float(record["factors"]["focal_prevalence"]), prevalence
+            )
+            for band in record["focal_true_probability_bands"]["cvae"]
+            if str(band["label"]) == label
+        ]
+        if values:
+            shrinkage_parts.append(
+                f"q={prevalence:g}, p-true {label}: MAE "
+                f"{np.mean([float(value['mae']) for value in values]):.4f}, bias "
+                f"{np.mean([float(value['bias']) for value in values]):+.4f}"
+            )
+    if shrinkage_parts:
+        lines.extend(
+            [
+                (
+                    "The main calibration pattern is compression toward the population "
+                    "mean: high individualized probabilities were underpredicted. "
+                    + "; ".join(shrinkage_parts)
+                    + "."
+                ),
+                "",
+            ]
+        )
+
+    lines.extend(["### Training sample size", ""])
+    n_parts = []
+    baseline_parts = []
+    for sample_size in _unique_sorted(
+        [int(record["factors"]["n_train"]) for record in core]
+    ):
+        group = [
+            record
+            for record in core
+            if int(record["factors"]["n_train"]) == sample_size
+        ]
+        n_parts.append(
+            f"n={sample_size:,}: {np.median([_oracle_focal(record, 'cvae')['mae'] for record in group]):.4f}"
+        )
+        baseline_parts.append(
+            f"{np.median([_oracle_focal(record, 'independent_softmax')['mae'] for record in group]):.4f}"
+        )
+    lines.extend(
+        [
+            "Pooled descriptively across prevalence and K, median CVAE focal MAE was "
+            + "; ".join(n_parts)
+            + ". The correctly specified softmax baseline improved monotonically over "
+            + "the same sample sizes ("
+            + " -> ".join(baseline_parts)
+            + "), whereas the frozen CVAE worsened again at n=8,000. More data did not "
+            "reliably cure this workflow.",
+            "",
+            "### Outcome cardinality",
+            "",
+            (
+                "Focal MAE alone is misleading at K=20. The DGP holds the anchor focal "
+                "probability function fixed across K and makes its nonfocal levels "
+                "exchangeable; the context outcomes carry distinct class surfaces. "
+                "The all-outcome probability vector, measured by equal-outcome total "
+                "variation and KL regret, generally deteriorated as K increased."
+            ),
+            "",
+            *_core_cardinality_table(core),
+            "",
+            "### Mixed versus uniform cardinality",
+            "",
+        ]
+    )
+    heterogeneous = [
+        record
+        for record in records
+        if record["factors"]["design"] == "heterogeneity"
+    ]
+    if heterogeneous:
+        comparisons = []
+        for sample_size in _unique_sorted(
+            [int(record["factors"]["n_train"]) for record in heterogeneous]
+        ):
+            group = [
+                record
+                for record in heterogeneous
+                if int(record["factors"]["n_train"]) == sample_size
+            ]
+            by_variant = {
+                variant: [
+                    record
+                    for record in group
+                    if str(record["factors"]["variant"]) == variant
+                ]
+                for variant in ("homogeneous", "heterogeneous")
+            }
+            comparisons.append(
+                f"n={sample_size:,}: focal MAE "
+                f"{np.mean([_oracle_focal(record, 'cvae')['mae'] for record in by_variant['homogeneous']]):.4f}/"
+                f"{np.mean([_oracle_focal(record, 'cvae')['mae'] for record in by_variant['heterogeneous']]):.4f} "
+                "and TV "
+                f"{np.mean([_oracle_summary(record, 'cvae')['mean_outcome_total_variation'] for record in by_variant['homogeneous']]):.4f}/"
+                f"{np.mean([_oracle_summary(record, 'cvae')['mean_outcome_total_variation'] for record in by_variant['heterogeneous']]):.4f}"
+            )
+        lines.extend(
+            [
+                "For homogeneous `[5,5,5,5]` versus heterogeneous `[2,3,5,10]` "
+                "(reported homogeneous/heterogeneous), "
+                + "; ".join(comparisons)
+                + ". There was no stable additional heterogeneity penalty, but all six "
+                "cells failed and the designs were not entropy matched. That result is "
+                "inconclusive, not reassuring.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _engineering_gate_summary(
+    records: Sequence[Mapping[str, Any]],
+    statuses: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    predictive_names = [
+        name
+        for name, check in records[0]["engineering_checks"]["checks"].items()
+        if check["kind"] == "predictive"
+    ]
+    mean_predictive_passes = sum(
+        all(bool(status["checks"][name]) for name in predictive_names)
+        for status in statuses
+    )
+    predictive_fit_passes = sum(
+        bool(record["engineering_checks"]["predictive_passed"]) for record in records
+    )
+    prerequisite_fit_passes = sum(
+        bool(record["engineering_checks"]["prerequisites_passed"]) for record in records
+    )
+    complete_fit_passes = sum(
+        bool(record["engineering_checks"]["passed"]) for record in records
+    )
+    labels = {
+        "focal_mae": "focal MAE",
+        "absolute_focal_bias": "absolute focal bias",
+        "focal_p95_absolute_error": "focal p95 absolute error",
+        "mean_outcome_total_variation": "mean-outcome TV",
+        "mean_outcome_kl_regret": "mean-outcome KL regret",
+        "quadrature_mean_absolute_change": "GH mean absolute change",
+        "quadrature_p99_absolute_change": "GH p99 absolute change",
+        "no_invalid_or_floor_hit": "valid probabilities / no floor hit",
+    }
+    lines = [
+        (
+            f"Only {predictive_fit_passes}/{len(records)} base fits met all five "
+            f"predictive tolerances; {prerequisite_fit_passes}/{len(records)} met all "
+            f"numerical/validity prerequisites; and {complete_fit_passes}/{len(records)} "
+            "met both. At the cell-mean level, "
+            f"{mean_predictive_passes}/{len(statuses)} cells met all five predictive "
+            "checks even before requiring every seed replicate to pass."
+        ),
+        "",
+        "| check | base fits passing | cell aggregates passing |",
+        "|---|---:|---:|",
+    ]
+    for name in records[0]["engineering_checks"]["checks"]:
+        fit_passes = sum(
+            bool(record["engineering_checks"]["checks"][name]["passed"])
+            for record in records
+        )
+        cell_passes = sum(bool(status["checks"][name]) for status in statuses)
+        lines.append(
+            f"| {labels.get(name, name)} | {fit_passes}/{len(records)} | "
+            f"{cell_passes}/{len(statuses)} |"
+        )
+    lines.extend(
+        [
+            "",
+            (
+                "The cell bias gate averages the absolute seed-level biases. The "
+                "low-prevalence table below instead shows mean signed bias, so opposite "
+                "seed biases can cancel there and must not be used to reconstruct the gate."
+            ),
+        ]
+    )
+    return lines
+
+
 def _cell_status_table(statuses: Sequence[Mapping[str, Any]]) -> List[str]:
     lines = [
         "| scenario | n | target prevalence | cardinalities / K | replicates passing | cell envelope | mean focal MAE | worst focal MAE | mean TV | mean KL regret | worst GH p99 change |",
@@ -1263,9 +1651,14 @@ def _cell_status_table(statuses: Sequence[Mapping[str, Any]]) -> List[str]:
     return lines
 
 
-def _mean_interval_summary(values: Sequence[float], digits: int = 4) -> str:
+def _mean_interval_summary(
+    values: Sequence[float], digits: int = 4, *, lower_bound: Optional[float] = None
+) -> str:
     mean, half_width = _mean_95_half_width(values)
-    return f"{mean:.{digits}f} [{mean - half_width:.{digits}f}, {mean + half_width:.{digits}f}]"
+    lower = mean - half_width
+    if lower_bound is not None:
+        lower = max(lower, lower_bound)
+    return f"{mean:.{digits}f} [{lower:.{digits}f}, {mean + half_width:.{digits}f}]"
 
 
 def _optional_interval_summary(values: Sequence[Optional[float]]) -> str:
@@ -1344,7 +1737,8 @@ def _low_prevalence_count_table(records: Sequence[Mapping[str, Any]]) -> List[st
         lines.append(
             f"| {prevalence:g} | {sample_size} | {cardinality} | "
             f"{np.median(counts):.0f} [{np.min(counts)}, {np.max(counts)}] | "
-            f"{_mean_interval_summary(mae)} | {_mean_interval_summary(bias)} |"
+            f"{_mean_interval_summary(mae, lower_bound=0.0)} | "
+            f"{_mean_interval_summary(bias)} |"
         )
     return lines
 
@@ -1506,11 +1900,20 @@ def render_categorical_probability_report(
         "",
         (
             f"The CVAE met its regime-specific engineering envelope in {met}/{len(statuses)} "
-            "evaluated cells. A cell label is not a global validity verdict: tolerances "
-            "vary with the focal-prevalence regime, and release decisions still require "
-            "scientific judgment about the intended downstream use."
+            "evaluated cells. Within this declared experiment, that is a failed validation, "
+            "not merely an inconclusive result. It does not prove that every possible CVAE "
+            "workflow will fail, but the present frozen workflow should not be treated as "
+            "an accurate conditional-probability engine."
         ),
         "",
+        (
+            "**Pipeline decision:** the categorical input/output and serialization contracts "
+            "can support reversible integration and shadow runs. Do not make the current "
+            "fitted CVAE a required scientific or production dependency; keep the probability "
+            "model swappable while the fitting objective and marginal integration are hardened."
+        ),
+        "",
+        *_factor_finding_lines(base),
         "## How to read the evidence",
         "",
         "- `p-true` is the exact simulated conditional probability; `p-hat` is a fitted model probability.",
@@ -1518,11 +1921,11 @@ def render_categorical_probability_report(
         "- Held-out NLL and multiclass Brier use realized outcomes and are proper predictive scores; lower is better.",
         "- ROC-AUC and average precision (PR-AUC/AP) measure ranking, not calibration. AP is especially useful for rare classes, but its baseline changes with prevalence.",
         "- AUC/AP are undefined when a test class has no positive or no negative observation. Coverage is shown explicitly; partial defined-class macros are not complete evidence.",
-        "- Trend-plot bars are two-sided 95% Student-t intervals across the fixed data seeds within each exact core cell unless a caption says they are full ranges.",
+        "- Trend-plot bars are two-sided 95% Student-t intervals across the fixed data seeds within each exact core cell unless a caption says they are full ranges. Displayed lower whiskers for nonnegative metrics are truncated at zero.",
         "",
         "## Descriptive comparison over included base fits",
         "",
-        "Entries are median [minimum, maximum] across fit records; regimes are intentionally not pooled into one inferential estimate.",
+        "Entries are median [minimum, maximum] across fit records; regimes are intentionally not pooled into one inferential estimate. Raw held-out multiclass Brier scores are comparable only within the same schema/cell because their scale changes with cardinality and outcome entropy; direct regret is the safer cross-regime quantity.",
         "",
         *_model_descriptive_table(base),
         "",
@@ -1534,6 +1937,12 @@ def render_categorical_probability_report(
                 "## Core factorial results",
                 "",
                 "### Low-prevalence cells in terms of events actually observed during training",
+                "",
+                (
+                    "The MAE interval is truncated at its natural lower bound of zero. "
+                    "Signed bias can cancel across seeds; the engineering gate instead "
+                    "uses the mean absolute seed-level bias."
+                ),
                 "",
                 *_low_prevalence_count_table(base),
                 "",
@@ -1567,6 +1976,8 @@ def render_categorical_probability_report(
                 "cell-mean checks and every fixed-seed replicate to meet the declared "
                 "fit-level checks; it is not permission to extrapolate to another regime."
             ),
+            "",
+            *_engineering_gate_summary(base, statuses),
             "",
             *_cell_status_table(statuses),
             "",
@@ -1613,7 +2024,35 @@ def render_categorical_probability_report(
                 [_markdown_image(Path(figure["path"]), report_parent, str(figure["caption"])), ""]
             )
 
-    lines.extend(["## Numerical integration diagnostics", "", *_quadrature_summary_table(base), ""])
+    quadrature_passes = sum(
+        bool(record["engineering_checks"]["prerequisites_passed"])
+        for record in base
+    )
+    lines.extend(
+        [
+            "## Numerical integration diagnostics",
+            "",
+            (
+                f"Only {quadrature_passes}/{len(base)} base fits met all numerical/validity "
+                "prerequisites. All probability matrices were syntactically valid, so the "
+                "failures came from GH21-versus-GH31 disagreement. Some large-n error "
+                "magnitudes are therefore numerically uncertain; predictive checks also "
+                "failed in stable-integration cells, so this does not explain away the "
+                "probability-recovery failure."
+            ),
+            "",
+            *_quadrature_summary_table(base),
+            "",
+            (
+                "The machine-readable artifact contains experimental `truth_calibration_` "
+                "`intercept`/`slope` fields whose undamped Newton solver can diverge for rare "
+                "classes. Those fields are excluded from this report and every gate. Direct "
+                "oracle errors, reliability bins, ECE, AUC/AP, Brier scores, and all plotted "
+                "probabilities are unaffected."
+            ),
+            "",
+        ]
+    )
     for figure in sections.get("Numerical diagnostics", []):
         lines.extend(
             [_markdown_image(Path(figure["path"]), report_parent, str(figure["caption"])), ""]
@@ -1636,8 +2075,9 @@ def render_categorical_probability_report(
                     "Reliability panels use the full held-out test set, bin on each "
                     "candidate model's p-hat and show both the observed event fraction "
                     "(95% Wilson interval) and mean p-true in that same bin. Bin counts are "
-                    "shown on the plotted points. Low-probability panels retain explicit "
-                    "overflow markers rather than silently dropping large errors."
+                    "summarized in each panel subtitle. Low-probability panels restrict the "
+                    "predicted-probability x axis but retain the full 0-1 y axis, so severe "
+                    "underprediction remains visible rather than being clipped."
                 ),
                 "",
             ]
@@ -1691,13 +2131,23 @@ def render_categorical_probability_report(
             f"- Disposition: {development.get('disposition', 'not recorded')}",
             f"- Canonical seed set: `{development.get('canonical_seed_set', run['selected_data_seeds'])}`.",
             "",
-            "### Exact reproduction commands",
+            "### Protocol rerun commands",
             "",
-            "The machine-readable result is committed as `docs/categorical_probability_validation_results.json`.",
+            "The machine-readable result is committed losslessly as `docs/categorical_probability_validation_results.json.gz` to avoid adding a 62 MB pretty-printed JSON file to Git history.",
+            (
+                "The canonical fits were produced from Git commit "
+                f"`{environment.get('git_head', 'not recorded')}` with runner SHA-256 "
+                f"`{environment.get('runner_source_sha256', 'not recorded')}`. A post-run "
+                "audit corrected only the excluded truth-calibration coefficient solver; "
+                "rerunning current source therefore corrects those unused fields without "
+                "changing the protocol, gates, or reported probability metrics. Checkout "
+                "the recorded commit to reproduce the exact canonical runner."
+            ),
             "",
             "```bash",
-            "PYTHONPATH=python .venv/bin/python -m validation.categorical_probability_validation --output docs/categorical_probability_validation_results.json --verbose",
-            "MPLCONFIGDIR=/tmp/multioutcome-cvae-matplotlib PYTHONPATH=python .venv/bin/python -m validation.categorical_probability_report docs/categorical_probability_validation_results.json --output docs/categorical_probability_validation.md --figure-dir docs/categorical_probability_validation_figures",
+            "PYTHONPATH=python .venv/bin/python -m validation.categorical_probability_validation --output /tmp/categorical_probability_validation_results.json --verbose",
+            "gzip -n -9 /tmp/categorical_probability_validation_results.json",
+            "MPLCONFIGDIR=/tmp/multioutcome-cvae-matplotlib PYTHONPATH=python .venv/bin/python -m validation.categorical_probability_report /tmp/categorical_probability_validation_results.json.gz --output docs/categorical_probability_validation.md --figure-dir docs/categorical_probability_validation_figures",
             "```",
             "",
             "### Exact protocol manifest",
@@ -1711,9 +2161,11 @@ def render_categorical_probability_report(
             "- The DGP uses bounded covariates and model-aligned linear-softmax marginals. It tests interpolation and controlled recovery, not arbitrary real-world misspecification or extrapolation.",
             "- The sample-size, prevalence, cardinality, architecture, optimization, and dependence settings are the declared grid; results do not automatically transfer beyond it.",
             "- The decoder-width-matched heterogeneity comparison has equal J and sum(K), but it is not entropy matched.",
+            "- The anchor focal probability function is held fixed across K and its nonfocal levels are exchangeable; context outcomes have distinct class surfaces. This isolates focal recovery but makes focal MAE alone an incomplete high-K diagnostic.",
             "- Reliability from realized outcomes is noisy for rare classes even with a large test set; direct oracle errors are the primary simulation evidence.",
             "- Initialization replicates reuse a fixed data split and therefore measure optimization sensitivity, not new-sample uncertainty.",
             "- Quadrature comparisons assess GH21 versus GH31 agreement, not mathematical proof that either order is exact.",
+            "- Experimental truth-calibration intercept/slope fields are excluded because their Newton solver was found to diverge in rare-class fits; no reported conclusion depends on them.",
             "- Engineering envelopes are regime-specific safeguards rather than a global certification of predictive validity.",
             "",
         ]
@@ -1746,7 +2198,13 @@ def write_categorical_probability_report(
 
 
 def load_probability_run(path: Path) -> Dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as handle:
+    path = Path(path)
+    handle_context = (
+        gzip.open(path, "rt", encoding="utf-8")
+        if path.suffix == ".gz"
+        else path.open("r", encoding="utf-8")
+    )
+    with handle_context as handle:
         run = json.load(handle)
     validate_probability_run(run)
     return run
@@ -1754,7 +2212,11 @@ def load_probability_run(path: Path) -> Dict[str, Any]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("results", type=Path, help="JSON written by the validation runner.")
+    parser.add_argument(
+        "results",
+        type=Path,
+        help="JSON written by the validation runner, optionally gzip-compressed.",
+    )
     parser.add_argument(
         "--output",
         type=Path,

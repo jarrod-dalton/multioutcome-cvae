@@ -6,6 +6,7 @@ import pytest
 from validation.categorical_probability_validation import (
     DEFAULT_CONFIG,
     IndependentSoftmaxBaseline,
+    _fractional_logistic_calibration,
     aggregate_cell_engineering_status,
     build_probability_protocol_manifest,
     build_probability_scenarios,
@@ -202,6 +203,31 @@ def test_oracle_metrics_have_exact_brier_tv_kl_and_focal_errors():
         np.sum(oracle["anchor"] * np.log(oracle["anchor"] / fitted["anchor"]), axis=1)
     )
     assert result["summary"]["mean_outcome_kl_regret"] == pytest.approx(expected_kl)
+
+
+def test_fractional_calibration_is_stable_for_rare_probabilities():
+    x = np.linspace(-2.0, 2.0, 20_000)
+    fitted = 1.0 / (1.0 + np.exp(-(-10.0 + 0.2 * x)))
+    fitted_logit = np.log(fitted) - np.log1p(-fitted)
+    actual = 1.0 / (1.0 + np.exp(-(-5.0 + 0.1 * fitted_logit)))
+    result = _fractional_logistic_calibration(actual, fitted, 1.0e-12)
+    assert result["intercept"] == pytest.approx(-5.0, abs=1.0e-6)
+    assert result["slope"] == pytest.approx(0.1, abs=1.0e-6)
+
+
+def test_fractional_calibration_handles_nonidentifiability_and_bad_inputs():
+    constant = _fractional_logistic_calibration(
+        np.array([0.1, 0.2, 0.3]), np.repeat(0.2, 3), 1.0e-12
+    )
+    assert constant == {"intercept": None, "slope": None}
+    with pytest.raises(ValueError, match="same-length vectors"):
+        _fractional_logistic_calibration(
+            np.array([0.1, 0.2]), np.array([[0.1, 0.2]]), 1.0e-12
+        )
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        _fractional_logistic_calibration(
+            np.array([0.1, 1.2]), np.array([0.1, 0.2]), 1.0e-12
+        )
 
 
 def test_quadrature_metric_and_tolerances_are_literal():
