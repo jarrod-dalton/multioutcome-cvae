@@ -1919,6 +1919,12 @@ def render_categorical_probability_report(
             "model swappable while the fitting objective and marginal integration are hardened."
         ),
         "",
+        (
+            "Focused remediation is tracked in [GitHub Issue #3]"
+            "(https://github.com/jarrod-dalton/multioutcome-cvae/issues/3); "
+            "the broader predictive-validity Issue #2 remains open."
+        ),
+        "",
         *_factor_finding_lines(base),
         "## How to read the evidence",
         "",

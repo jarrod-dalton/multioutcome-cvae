@@ -30,6 +30,9 @@ Unreleased.
   integration. Only 5/170 base fits met all predictive tolerances, 1/170 met
   both predictive and numerical requirements, and the correctly specified
   independent-softmax baseline was usually more accurate.
+- Opened GitHub Issue #3 for stable integration references, objective and
+  checkpoint-selection ablations, initialization sensitivity, and a
+  marginal-preserving fallback design.
 - Replaced an unstable undamped Newton calculation for experimental
   truth-calibration intercepts/slopes with centered, damped Newton updates and
   a rare-probability regression test. The defective fields were not used by

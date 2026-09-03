@@ -270,6 +270,8 @@ also met the numerical prerequisites. A correctly specified independent
 softmax model was usually more accurate. The API may be used for reversible
 plumbing and shadow runs, but do not treat the current categorical CVAE as a
 validated probability engine or make a production joint-prediction claim.
+The focused hardening sequence is tracked in
+[GitHub Issue #3](https://github.com/jarrod-dalton/multioutcome-cvae/issues/3).
 
 Poisson support remains available for compatibility but is deprecated and is
 not production-supported. Negative Binomial remains experimental and is not

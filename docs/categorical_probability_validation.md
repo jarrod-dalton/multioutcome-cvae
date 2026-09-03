@@ -16,6 +16,8 @@ The CVAE met its regime-specific engineering envelope in 0/34 evaluated cells. W
 
 **Pipeline decision:** the categorical input/output and serialization contracts can support reversible integration and shadow runs. Do not make the current fitted CVAE a required scientific or production dependency; keep the probability model swappable while the fitting objective and marginal integration are hardened.
 
+Focused remediation is tracked in [GitHub Issue #3](https://github.com/jarrod-dalton/multioutcome-cvae/issues/3); the broader predictive-validity Issue #2 remains open.
+
 ## What the experiment says about the requested circumstances
 
 ### Baseline probability and calibration

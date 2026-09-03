@@ -42,6 +42,8 @@ Brier score. A hardened workflow must approach the independent-softmax
 marginals under the model-aligned DGP, improve with nested sample size, ignore
 the latent variable under the rho=0 control, converge numerically, and remain
 stable across initializations before this gate changes.
+This work is tracked in
+[GitHub Issue #3](https://github.com/jarrod-dalton/multioutcome-cvae/issues/3).
 
 ## Required pipeline manifest
 
