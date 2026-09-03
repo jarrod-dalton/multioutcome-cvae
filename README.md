@@ -260,7 +260,11 @@ Production-supported outcome types are:
 for multivariate nominal outcomes with two or more levels each. Its broader
 probabilistic predictive validation is still in progress in
 [GitHub Issue #2](https://github.com/jarrod-dalton/multioutcome-cvae/issues/2),
-so downstream use should remain explicitly experimental and replaceable.
+so downstream use should remain explicitly experimental and replaceable. The
+locked [Phase A validation report](docs/categorical_predictive_validation.md)
+is **inconclusive**: marginal score gates passed, but residual-dependence
+behavior and numerical integration gates did not. Do not make a production
+joint-prediction claim from the current evidence.
 
 Poisson support remains available for compatibility but is deprecated and is
 not production-supported. Negative Binomial remains experimental and is not

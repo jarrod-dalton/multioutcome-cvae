@@ -18,6 +18,9 @@ Unreleased.
 - Added a predeclared, generated Phase A predictive-validation workflow with
   proper marginal and joint scores, oracle comparisons, conditional-
   independence controls, quadrature diagnostics, and visible failure gates.
+- The locked Phase A run is inconclusive: all marginal-improvement gates
+  passed, while four joint predictive gates and 18 quadrature prerequisites
+  failed. Categorical joint simulation remains experimental pending Issue #2.
 
 ## Portable inference
 

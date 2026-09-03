@@ -7,6 +7,24 @@ probabilistic predictive validity. That evidence is tracked separately in
 Until that work passes its predeclared gates, downstream code must keep this
 model replaceable and must not describe its output as production-validated.
 
+## Current evidence gate
+
+The locked [Phase A report](categorical_predictive_validation.md) is
+**inconclusive**. All marginal-improvement gates passed, and both latent units
+were active at the selected checkpoints, but the fitted joint distribution
+failed both conditional-independence controls, one mixed-cardinality dependent
+seed had negative joint gain, and 31-node versus 41-node quadrature was not
+stable enough in the tails. This is not the same failure mode as an unusable
+input/output API; it is evidence that the present joint predictions are not
+ready to drive production or scientific decisions.
+
+It is reasonable to build reversible plumbing now: schema validation,
+artifact registries, feature-manifest checks, shadow execution, and interfaces
+that can swap in another conditional joint generator. Do not yet make the
+current categorical CVAE a hard dependency for irreversible pipeline choices,
+calibration claims, or downstream estimands that rely on its learned residual
+dependence.
+
 ## Required pipeline manifest
 
 Keep a versioned manifest beside every fitted artifact. It must record:
